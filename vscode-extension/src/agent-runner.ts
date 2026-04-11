@@ -218,40 +218,11 @@ export class AgentRunner {
           return;
         }
 
-        // Parse JSON output — it may have other text before/after the JSON
-        const jsonMatch = stdout.match(/\{[\s\S]*"text"[\s\S]*\}/);
-        if (!jsonMatch) {
-          // Return a best-effort result with the raw text
-          resolve({
-            text: stdout.trim() || '(no output)',
-            turns: 0,
-            usage: { input: 0, output: 0 },
-            cost_usd: 0,
-            stop_reason: 'unknown',
-            messages: [],
-          });
-          return;
-        }
-
-        try {
-          const result = JSON.parse(jsonMatch[0]) as RunResult;
-          resolve(result);
-        } catch (e) {
-          // Try parsing the entire stdout as JSON
-          try {
-            const result = JSON.parse(stdout.trim()) as RunResult;
-            resolve(result);
-          } catch {
-            resolve({
-              text: stdout.trim(),
-              turns: 0,
-              usage: { input: 0, output: 0 },
-              cost_usd: 0,
-              stop_reason: 'parse_error',
-              messages: [],
-            });
-          }
-        }
+        // Parse JSON output — the CLI outputs pretty-printed JSON with --json flag.
+        // Strategy: try multiple approaches to extract the structured result,
+        // and always ensure we return the text field, never raw JSON.
+        const parsed = this._parseRunOutput(stdout);
+        resolve(parsed);
       });
 
       proc.on('error', (err) => {
@@ -259,6 +230,84 @@ export class AgentRunner {
         reject(new Error(`Failed to start Altimeter: ${err.message}`));
       });
     });
+  }
+
+  private _parseRunOutput(stdout: string): RunResult {
+    const fallback: RunResult = {
+      text: stdout.trim() || '(no output)',
+      turns: 0,
+      usage: { input: 0, output: 0 },
+      cost_usd: 0,
+      stop_reason: 'unknown',
+      messages: [],
+    };
+
+    // Strategy 1: Try parsing entire stdout as JSON (most common case with --json)
+    try {
+      const result = JSON.parse(stdout.trim()) as RunResult;
+      if (result && typeof result.text === 'string') {
+        return result;
+      }
+    } catch {
+      // Not valid JSON as-is, try extraction
+    }
+
+    // Strategy 2: Find the outermost { ... } containing "text" field
+    // Use a balanced-brace approach instead of greedy regex
+    const textIdx = stdout.indexOf('"text"');
+    if (textIdx === -1) {
+      return fallback;
+    }
+
+    // Walk backwards from "text" to find the opening brace of the JSON object
+    let braceStart = -1;
+    for (let i = textIdx - 1; i >= 0; i--) {
+      if (stdout[i] === '{') {
+        braceStart = i;
+        break;
+      }
+    }
+    if (braceStart === -1) {
+      return fallback;
+    }
+
+    // Walk forward from braceStart counting braces to find the matching close
+    let depth = 0;
+    let braceEnd = -1;
+    for (let i = braceStart; i < stdout.length; i++) {
+      if (stdout[i] === '{') { depth++; }
+      else if (stdout[i] === '}') {
+        depth--;
+        if (depth === 0) {
+          braceEnd = i;
+          break;
+        }
+      }
+    }
+    if (braceEnd === -1) {
+      return fallback;
+    }
+
+    try {
+      const result = JSON.parse(stdout.slice(braceStart, braceEnd + 1)) as RunResult;
+      if (result && typeof result.text === 'string') {
+        return result;
+      }
+    } catch {
+      // Extraction failed
+    }
+
+    // Strategy 3: If stdout looks like raw JSON, try to extract just the text field
+    // This prevents showing raw JSON when parsing fails on the full object
+    if (stdout.trim().startsWith('{') && stdout.includes('"text"')) {
+      const textMatch = stdout.match(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (textMatch) {
+        fallback.text = JSON.parse(`"${textMatch[1]}"`);
+        fallback.stop_reason = 'parse_error';
+      }
+    }
+
+    return fallback;
   }
 
   async listTools(): Promise<string[]> {

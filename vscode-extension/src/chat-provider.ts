@@ -105,11 +105,23 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
         },
       });
 
-      // Post the final response
+      // Post the final response — extract text from JSON if the runner
+      // returned a raw JSON blob instead of the extracted text field
+      let displayText = result.text || '(no response)';
+      if (displayText.trimStart().startsWith('{') && displayText.includes('"text"')) {
+        try {
+          const parsed = JSON.parse(displayText);
+          if (parsed && typeof parsed.text === 'string') {
+            displayText = parsed.text;
+          }
+        } catch {
+          // Not JSON, use as-is
+        }
+      }
       this._postMessage({
         type: 'addMessage',
         role: 'assistant',
-        content: result.text || '(no response)',
+        content: displayText,
       });
 
       // Post stats
