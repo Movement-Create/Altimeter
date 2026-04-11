@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Outer circle -->
+  <circle cx="50" cy="50" r="44" stroke="currentColor" stroke-width="7" fill="none"/>
+  <!-- Diagonal line (slash) - diameter at ~45 degrees -->
+  <line x1="19" y1="81" x2="81" y2="19" stroke="currentColor" stroke-width="7" stroke-linecap="round"/>
+</svg>
