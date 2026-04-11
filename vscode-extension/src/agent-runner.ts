@@ -17,19 +17,38 @@ export interface AgentRunOptions {
   prompt: string;
   provider?: string;
   model?: string;
+  mode?: string;
   maxTurns?: number;
   maxBudget?: number;
   auto?: boolean;
   onStdout?: (data: string) => void;
   onStderr?: (data: string) => void;
+  onChunk?: (text: string) => void;
+  allowedTools?: string[];
+}
+
+export interface RunnerConfig {
+  model?: string;
+  provider?: string;
+  mode?: string;
+  effort?: string;
 }
 
 export class AgentRunner {
   private outputChannel: vscode.OutputChannel;
   private currentProcess: ChildProcess | null = null;
+  private _config: RunnerConfig = {};
 
   constructor(outputChannel: vscode.OutputChannel) {
     this.outputChannel = outputChannel;
+  }
+
+  setConfig(config: RunnerConfig): void {
+    this._config = { ...this._config, ...config };
+  }
+
+  getRunnerConfig(): RunnerConfig {
+    return { ...this._config };
   }
 
   private getConfig() {
@@ -122,6 +141,30 @@ export class AgentRunner {
     return env;
   }
 
+  private getPermissionRules(): Record<string, string> {
+    const config = vscode.workspace.getConfiguration('altimeter');
+    return config.get<Record<string, string>>('permissionRules', {
+      file_read: 'always',
+      grep: 'always',
+      glob: 'always',
+      file_write: 'ask',
+      file_edit: 'ask',
+      bash: 'ask',
+      code_run: 'ask',
+    });
+  }
+
+  private buildAllowedTools(): string[] {
+    const rules = this.getPermissionRules();
+    const allowed: string[] = [];
+    for (const [tool, rule] of Object.entries(rules)) {
+      if (rule === 'always') {
+        allowed.push(tool);
+      }
+    }
+    return allowed;
+  }
+
   async run(options: AgentRunOptions): Promise<RunResult> {
     const config = this.getConfig();
     const altimeterDir = this.getAltimeterPath();
@@ -138,9 +181,11 @@ export class AgentRunner {
       throw new Error(`Altimeter index.js not found at: ${indexPath}`);
     }
 
-    const provider = options.provider || config.provider;
-    const model = options.model || config.model;
+    // Merge runner config overrides with options and settings
+    const provider = options.provider || this._config.provider || config.provider;
+    const model = options.model || this._config.model || config.model;
     const maxTurns = options.maxTurns || config.maxTurns;
+    const mode = options.mode || this._config.mode || 'auto';
     const auto = options.auto !== undefined ? options.auto : config.autoApprove;
 
     const args = [
@@ -150,11 +195,21 @@ export class AgentRunner {
       '--provider', provider,
       '--model', model,
       '--max-turns', String(maxTurns),
-      '--json',
     ];
 
-    if (auto) {
+    // Mode handling: Plan mode gets --plan, Auto mode gets --auto, Default uses permission rules
+    if (mode === 'plan') {
+      args.push('--plan');
       args.push('--auto');
+    } else if (mode === 'auto' || auto) {
+      args.push('--auto');
+    } else {
+      // Default mode: use --auto but restrict with allowed-tools from permission rules
+      args.push('--auto');
+      const allowedTools = options.allowedTools || this.buildAllowedTools();
+      if (allowedTools.length > 0) {
+        args.push('--allowed-tools', allowedTools.join(','));
+      }
     }
 
     if (options.maxBudget !== undefined) {
@@ -169,6 +224,7 @@ export class AgentRunner {
     return new Promise((resolve, reject) => {
       let stdout = '';
       let stderr = '';
+      let streamedText = '';
 
       const proc = spawn('node', args, {
         cwd: altimeterDir,
@@ -182,8 +238,32 @@ export class AgentRunner {
         const chunk = data.toString();
         stdout += chunk;
         this.outputChannel.append(chunk);
+
         if (options.onStdout) {
           options.onStdout(chunk);
+        }
+
+        // Streaming: detect text output vs JSON/tool-use and forward text chunks
+        if (options.onChunk) {
+          const lines = chunk.split('\n');
+          for (const line of lines) {
+            const trimmed = line.trim();
+            // Skip empty lines and JSON objects (tool calls, status messages)
+            if (!trimmed) {
+              continue;
+            }
+            if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+              // Likely JSON — skip for streaming text
+              continue;
+            }
+            // Skip common CLI status lines
+            if (trimmed.startsWith('[tool:') || trimmed.startsWith('---') || trimmed.startsWith('===')) {
+              continue;
+            }
+            // This is text content — forward it
+            streamedText += line + '\n';
+            options.onChunk(line + '\n');
+          }
         }
       });
 
@@ -218,10 +298,15 @@ export class AgentRunner {
           return;
         }
 
-        // Parse JSON output — the CLI outputs pretty-printed JSON with --json flag.
-        // Strategy: try multiple approaches to extract the structured result,
-        // and always ensure we return the text field, never raw JSON.
+        // Try to parse structured JSON from the output.
+        // Without --json flag, the output is mostly text with possible JSON summary at end.
         const parsed = this._parseRunOutput(stdout);
+
+        // If we streamed text and didn't get good parsed text, use the streamed content
+        if (streamedText.trim() && (!parsed.text || parsed.text === '(no output)' || parsed.text.trimStart().startsWith('{'))) {
+          parsed.text = streamedText.trim();
+        }
+
         resolve(parsed);
       });
 

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { AgentRunner } from './agent-runner';
+import { AgentRunner, RunnerConfig } from './agent-runner';
 import { AltimeterStatusBar } from './status-bar';
 
 export class AltimeterChatProvider implements vscode.WebviewViewProvider {
@@ -12,6 +12,7 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
   private _statusBar: AltimeterStatusBar;
   private _extensionUri: vscode.Uri;
   private _isRunning = false;
+  private _streamingMessageStarted = false;
 
   constructor(
     extensionUri: vscode.Uri,
@@ -46,8 +47,16 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
         case 'cancel':
           this._runner.cancel();
           this._isRunning = false;
+          this._streamingMessageStarted = false;
           this._statusBar.setIdle();
+          this._postMessage({ type: 'streamEnd' });
           this._postMessage({ type: 'loading', active: false });
+          break;
+        case 'configChange':
+          this._handleConfigChange(message);
+          break;
+        case 'requestFiles':
+          await this._handleRequestFiles(message.query);
           break;
         case 'ready':
           // Webview is ready
@@ -89,40 +98,50 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
     }
 
     this._isRunning = true;
+    this._streamingMessageStarted = false;
     this._statusBar.setRunning('Thinking');
     this._postMessage({ type: 'loading', active: true });
 
+    // Expand @file and @selection references in the prompt
+    const expandedPrompt = await this._expandPromptReferences(prompt);
+
     try {
       const result = await this._runner.run({
-        prompt,
+        prompt: expandedPrompt,
         onStdout: (chunk) => {
-          // Try to detect tool call patterns from raw output
-          // Altimeter may emit tool calls to stdout before JSON
           this._parseAndForwardChunk(chunk);
         },
-        onStderr: (chunk) => {
-          // Log stderr to output channel only, don't show in UI
+        onStderr: () => {
+          // Log stderr to output channel only
+        },
+        onChunk: (text) => {
+          // Stream text chunks to the webview in real-time
+          this._postMessage({ type: 'streamChunk', text });
         },
       });
 
-      // Post the final response — extract text from JSON if the runner
-      // returned a raw JSON blob instead of the extracted text field
-      let displayText = result.text || '(no response)';
-      if (displayText.trimStart().startsWith('{') && displayText.includes('"text"')) {
-        try {
-          const parsed = JSON.parse(displayText);
-          if (parsed && typeof parsed.text === 'string') {
-            displayText = parsed.text;
+      // Signal end of stream
+      this._postMessage({ type: 'streamEnd' });
+
+      // If no streaming happened, post the full response as a message
+      if (!this._streamingMessageStarted) {
+        let displayText = result.text || '(no response)';
+        if (displayText.trimStart().startsWith('{') && displayText.includes('"text"')) {
+          try {
+            const parsed = JSON.parse(displayText);
+            if (parsed && typeof parsed.text === 'string') {
+              displayText = parsed.text;
+            }
+          } catch {
+            // Not JSON, use as-is
           }
-        } catch {
-          // Not JSON, use as-is
         }
+        this._postMessage({
+          type: 'addMessage',
+          role: 'assistant',
+          content: displayText,
+        });
       }
-      this._postMessage({
-        type: 'addMessage',
-        role: 'assistant',
-        content: displayText,
-      });
 
       // Post stats
       this._postMessage({
@@ -134,6 +153,7 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
         outputTokens: result.usage?.output || 0,
       });
     } catch (err) {
+      this._postMessage({ type: 'streamEnd' });
       const errMsg = err instanceof Error ? err.message : String(err);
       this._postMessage({
         type: 'addMessage',
@@ -143,9 +163,100 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
       this._statusBar.setError('Failed');
     } finally {
       this._isRunning = false;
+      this._streamingMessageStarted = false;
       this._statusBar.setIdle();
       this._postMessage({ type: 'loading', active: false });
     }
+  }
+
+  private _handleConfigChange(message: { model?: string; mode?: string; effort?: string }): void {
+    const config: RunnerConfig = {};
+    if (message.model) {
+      // Derive provider from model name
+      if (message.model.startsWith('gemini')) {
+        config.provider = 'google';
+      } else if (message.model.startsWith('claude')) {
+        config.provider = 'anthropic';
+      } else if (message.model.startsWith('gpt')) {
+        config.provider = 'openai';
+      }
+      config.model = message.model;
+    }
+    if (message.mode) {
+      config.mode = message.mode.toLowerCase();
+    }
+    if (message.effort) {
+      config.effort = message.effort.toLowerCase();
+    }
+    this._runner.setConfig(config);
+  }
+
+  private async _handleRequestFiles(query?: string): Promise<void> {
+    try {
+      const files = await vscode.workspace.findFiles('**/*', '**/node_modules/**', 50);
+      const filePaths = files.map(f => vscode.workspace.asRelativePath(f));
+      // Filter by query if provided
+      const filtered = query
+        ? filePaths.filter(p => p.toLowerCase().includes(query.toLowerCase()))
+        : filePaths;
+      this._postMessage({ type: 'fileList', files: filtered.slice(0, 30) });
+    } catch {
+      this._postMessage({ type: 'fileList', files: [] });
+    }
+  }
+
+  private async _expandPromptReferences(prompt: string): Promise<string> {
+    let expanded = prompt;
+    const contextBlocks: string[] = [];
+
+    // Handle @selection
+    if (expanded.includes('@selection')) {
+      const editor = vscode.window.activeTextEditor;
+      if (editor && !editor.selection.isEmpty) {
+        const selectedText = editor.document.getText(editor.selection);
+        const fileName = vscode.workspace.asRelativePath(editor.document.uri);
+        const startLine = editor.selection.start.line + 1;
+        const endLine = editor.selection.end.line + 1;
+        contextBlocks.push(
+          `[Selected code from ${fileName} lines ${startLine}-${endLine}]\n\`\`\`\n${selectedText}\n\`\`\``
+        );
+        expanded = expanded.replace(/@selection/g, '');
+      }
+    }
+
+    // Handle @file references — pattern: @path/to/file
+    const fileRefPattern = /@([\w./-]+\.\w+)/g;
+    let match;
+    const fileRefs: string[] = [];
+    while ((match = fileRefPattern.exec(expanded)) !== null) {
+      if (match[1] !== 'selection') {
+        fileRefs.push(match[1]);
+      }
+    }
+
+    for (const filePath of fileRefs) {
+      try {
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders) {
+          const fullUri = vscode.Uri.joinPath(workspaceFolders[0].uri, filePath);
+          const fileContent = await vscode.workspace.fs.readFile(fullUri);
+          const text = Buffer.from(fileContent).toString('utf-8');
+          const ext = path.extname(filePath).slice(1) || '';
+          contextBlocks.push(
+            `[Context: ${filePath}]\n\`\`\`${ext}\n${text}\n\`\`\``
+          );
+        }
+      } catch {
+        // File not found, skip
+      }
+      expanded = expanded.replace(new RegExp(`@${filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'), filePath);
+    }
+
+    if (contextBlocks.length > 0) {
+      return contextBlocks.join('\n\n') + '\n\n' + expanded.trim();
+    }
+
+    return expanded;
   }
 
   private _parseAndForwardChunk(chunk: string): void {
@@ -207,10 +318,30 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
     </div>
 
     <div id="input-area">
+      <div id="toolbar">
+        <select id="modelSelect" aria-label="Model">
+          <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+          <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+          <option value="claude-3-5-sonnet-20241022">claude-3.5-sonnet</option>
+          <option value="claude-3-5-haiku-20241022">claude-3.5-haiku</option>
+          <option value="gpt-4o">gpt-4o</option>
+          <option value="gpt-4o-mini">gpt-4o-mini</option>
+        </select>
+        <select id="modeSelect" aria-label="Mode">
+          <option value="auto">Auto</option>
+          <option value="default">Default</option>
+          <option value="plan">Plan</option>
+        </select>
+        <select id="effortSelect" aria-label="Effort">
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+          <option value="high">High</option>
+        </select>
+      </div>
       <div id="input-wrapper">
         <textarea
           id="messageInput"
-          placeholder="Ask Altimeter anything..."
+          placeholder="Ask Altimeter anything... (@ to reference files)"
           rows="1"
           aria-label="Message input"
         ></textarea>
@@ -220,7 +351,8 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
           </svg>
         </button>
       </div>
-      <div id="input-hint">Enter to send · Shift+Enter for newline</div>
+      <div id="file-autocomplete" class="hidden"></div>
+      <div id="input-hint">Enter to send · Shift+Enter for newline · @ to reference files</div>
     </div>
   </div>
 
