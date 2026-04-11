@@ -61,10 +61,10 @@ const EFFORT_MODELS: Record<
     max: "o1-preview",
   },
   google: {
-    low: "gemini-1.5-flash",
-    medium: "gemini-1.5-flash",
-    high: "gemini-1.5-pro",
-    max: "gemini-1.5-pro",
+    low: "gemini-2.0-flash-lite",
+    medium: "gemini-2.5-flash",
+    high: "gemini-2.5-flash",
+    max: "gemini-2.5-pro",
   },
   ollama: {
     low: "llama3.2",

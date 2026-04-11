@@ -179,6 +179,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         toolResultBlocks.push({
           type: "tool_result",
           tool_use_id: call.id,
+          name: call.name,
           content: `[Blocked by hook: ${preHook.reason ?? "hook policy"}]`,
           is_error: true,
         });
@@ -220,6 +221,7 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       toolResultBlocks.push({
         type: "tool_result",
         tool_use_id: call.id,
+        name: effectiveCall.name,
         content: finalContent,
         is_error: result.is_error,
       });

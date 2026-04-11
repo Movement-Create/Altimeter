@@ -22,9 +22,10 @@ import {
 const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
 const PRICING: Record<string, { input: number; output: number }> = {
-  "gemini-1.5-pro": { input: 3.5, output: 10.5 },
-  "gemini-1.5-flash": { input: 0.075, output: 0.3 },
-  "gemini-2.0-flash-exp": { input: 0, output: 0 }, // Free tier
+  "gemini-2.5-pro": { input: 1.25, output: 10.0 },
+  "gemini-2.5-flash": { input: 0.15, output: 0.6 },
+  "gemini-2.0-flash": { input: 0.1, output: 0.4 },
+  "gemini-2.0-flash-lite": { input: 0.025, output: 0.1 },
 };
 
 export class GoogleProvider extends BaseProvider {
@@ -46,6 +47,8 @@ export class GoogleProvider extends BaseProvider {
     for (const msg of messages) {
       if (msg.role === "system") continue; // handled separately
 
+      // Gemini uses "user" and "model" roles only.
+      // Tool results (role="tool") become "user" with functionResponse parts.
       const role = msg.role === "assistant" ? "model" : "user";
       const parts = this.convertToParts(msg);
 
@@ -89,9 +92,11 @@ export class GoogleProvider extends BaseProvider {
           });
           break;
         case "tool_result":
+          // Gemini requires function name, not call ID.
+          // We store the tool name in tool_use_id via agent-loop mapping.
           parts.push({
             functionResponse: {
-              name: b.tool_use_id, // we store the id here; ideally we'd track name
+              name: b.name ?? b.tool_use_id ?? "unknown",
               response: { result: b.content ?? "" },
             },
           });

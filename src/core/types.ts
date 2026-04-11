@@ -44,6 +44,8 @@ export interface ToolUseContent {
 export interface ToolResultContent {
   type: "tool_result";
   tool_use_id: string;
+  /** Tool name — needed by Gemini's functionResponse */
+  name?: string;
   content: string;
   is_error?: boolean;
 }
