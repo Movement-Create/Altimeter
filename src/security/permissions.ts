@@ -95,22 +95,63 @@ export function detectDangerousCommand(command: string): {
   dangerous: boolean;
   reason?: string;
 } {
-  const dangerousPatterns: Array<[RegExp, string]> = [
-    [/rm\s+-rf\s+\/(?:\s|$)/, "Recursive delete of root filesystem"],
+  // Normalize: collapse whitespace
+  const normalized = command.replace(/\s+/g, " ").trim();
+
+  // Layer 1: Direct pattern matching
+  const directPatterns: Array<[RegExp, string]> = [
+    // Filesystem destruction
+    [/rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|--force\s+).*\//, "Forced recursive delete"],
+    [/rm\s+(-[a-zA-Z]*r[a-zA-Z]*\s+|--recursive\s+).*\//, "Recursive delete from root-adjacent path"],
     [/>\s*\/dev\/sd[a-z]/, "Direct write to disk device"],
-    [/dd\s+.*if=.*of=\/dev\//, "dd to disk device"],
-    [/mkfs/, "Filesystem format command"],
-    [/:(){ :|:& };:/, "Fork bomb"],
-    [/curl[^|]*\|\s*(bash|sh)/, "Curl pipe to shell (potential code execution)"],
-    [/wget[^|]*\|\s*(bash|sh)/, "Wget pipe to shell"],
-    [/eval\s+\$\(/, "Eval command substitution"],
-    [/chmod\s+777\s+\//, "World-writable permissions on root"],
+    [/dd\s+.*of=\/dev\//, "dd to disk device"],
+    [/mkfs\./, "Filesystem format"],
+    [/fdisk\s/, "Disk partition modification"],
+
+    // Fork/resource bombs
+    [/:\(\)\s*\{.*\|.*&\s*\}\s*;/, "Fork bomb"],
+    [/while\s+true.*do.*done/, "Infinite loop (review manually)"],
+
+    // Remote code execution
+    [/curl\s[^|]*\|\s*(bash|sh|zsh|python|perl|ruby)/, "Curl pipe to interpreter"],
+    [/wget\s[^|]*\|\s*(bash|sh|zsh|python|perl|ruby)/, "Wget pipe to interpreter"],
+    [/curl\s[^|]*>\s*\/tmp\/[^;]*;\s*(bash|sh|chmod)/, "Download and execute pattern"],
+
+    // Eval / injection
+    [/eval\s+["'`$]/, "Eval with dynamic input"],
+    [/\$\(.*\)\s*\|\s*(bash|sh)/, "Command substitution piped to shell"],
+
+    // Credential / system compromise
+    [/passwd\s/, "Password modification"],
+    [/chmod\s+(0?777|a\+rwx)\s+\//, "World-writable permissions on system path"],
+    [/chown\s+.*\/etc/, "Ownership change on system config"],
+
+    // Network exfiltration indicators
+    [/nc\s+-[a-zA-Z]*l[a-zA-Z]*\s/, "Netcat listener"],
+    [/\/dev\/(tcp|udp)\//, "Bash network device"],
   ];
 
-  for (const [pattern, reason] of dangerousPatterns) {
-    if (pattern.test(command)) {
+  for (const [pattern, reason] of directPatterns) {
+    if (pattern.test(normalized)) {
       return { dangerous: true, reason };
     }
+  }
+
+  // Layer 2: Base64-encoded command detection
+  const base64Exec = /echo\s+[A-Za-z0-9+/=]{8,}\s*\|\s*base64\s+-d\s*\|\s*(bash|sh)/;
+  if (base64Exec.test(normalized)) {
+    return { dangerous: true, reason: "Base64-encoded command execution" };
+  }
+
+  // Layer 3: Python/Node one-liner system calls
+  const scriptExec = /python[23]?\s+-c\s+["'].*(?:os\.system|subprocess|exec|__import__).*["']/;
+  if (scriptExec.test(normalized)) {
+    return { dangerous: true, reason: "Script interpreter system call" };
+  }
+
+  const nodeExec = /node\s+-e\s+["'].*(?:child_process|exec|spawn).*["']/;
+  if (nodeExec.test(normalized)) {
+    return { dangerous: true, reason: "Node.js child_process execution" };
   }
 
   return { dangerous: false };

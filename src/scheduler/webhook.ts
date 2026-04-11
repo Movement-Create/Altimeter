@@ -12,6 +12,7 @@
  * - Each webhook call creates a new agent session
  * - Response is streamed as SSE (Server-Sent Events) or returned as JSON
  * - Webhook failures don't crash the server
+ * - Rate limiting and concurrency cap protect against abuse
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "http";
@@ -24,6 +25,13 @@ export class WebhookServer {
   private config?: AltimeterConfig;
   private port: number;
   private secret: string;
+
+  // Rate limiting
+  private requestCounts: Map<string, { count: number; resetAt: number }> = new Map();
+  private activeRequests = 0;
+  private readonly MAX_REQUESTS_PER_MINUTE = 30;
+  private readonly MAX_CONCURRENT_REQUESTS = 5;
+  private readonly MAX_BODY_BYTES = 1_048_576; // 1MB
 
   constructor(port = 7331) {
     this.port = port;
@@ -56,6 +64,25 @@ export class WebhookServer {
   // Private
   // ---------------------------------------------------------------------------
 
+  private checkRateLimit(clientIp: string): boolean {
+    const now = Date.now();
+    const entry = this.requestCounts.get(clientIp);
+
+    if (!entry || now > entry.resetAt) {
+      this.requestCounts.set(clientIp, { count: 1, resetAt: now + 60_000 });
+      return true;
+    }
+
+    entry.count++;
+    return entry.count <= this.MAX_REQUESTS_PER_MINUTE;
+  }
+
+  private getClientIp(req: IncomingMessage): string {
+    const forwarded = req.headers["x-forwarded-for"];
+    if (typeof forwarded === "string") return forwarded.split(",")[0].trim();
+    return req.socket.remoteAddress ?? "unknown";
+  }
+
   private async handleRequest(
     req: IncomingMessage,
     res: ServerResponse
@@ -77,6 +104,21 @@ export class WebhookServer {
       return;
     }
 
+    // Rate limit check
+    const clientIp = this.getClientIp(req);
+    if (!this.checkRateLimit(clientIp)) {
+      res.writeHead(429, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Rate limit exceeded. Max 30 requests/minute." }));
+      return;
+    }
+
+    // Concurrent request check
+    if (this.activeRequests >= this.MAX_CONCURRENT_REQUESTS) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Too many concurrent requests. Try again shortly." }));
+      return;
+    }
+
     // Auth check
     if (this.secret) {
       const auth = req.headers.authorization ?? "";
@@ -88,14 +130,17 @@ export class WebhookServer {
       }
     }
 
-    // Parse body
+    // Parse body with size limit
     let body: { prompt?: string; session_id?: string };
     try {
-      const rawBody = await readBody(req);
+      const rawBody = await readBody(req, this.MAX_BODY_BYTES);
       body = JSON.parse(rawBody);
-    } catch {
+    } catch (e) {
+      const message = e instanceof Error && e.message === "Body too large"
+        ? "Request body too large"
+        : "Invalid JSON body";
       res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Invalid JSON body" }));
+      res.end(JSON.stringify({ error: message }));
       return;
     }
 
@@ -111,10 +156,12 @@ export class WebhookServer {
       return;
     }
 
-    // Run agent
+    // Run agent with concurrency tracking
+    this.activeRequests++;
     try {
       const session = await sessionManager.createSession(this.config, {
         title: `Webhook: ${body.prompt.slice(0, 50)}`,
+        permission_mode: "auto", // Webhooks are headless — must explicitly opt in
       });
 
       const result = await runAgent({ prompt: body.prompt, session });
@@ -131,14 +178,26 @@ export class WebhookServer {
     } catch (e) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: String(e) }));
+    } finally {
+      this.activeRequests--;
     }
   }
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    let totalBytes = 0;
+
+    req.on("data", (chunk: Buffer) => {
+      totalBytes += chunk.length;
+      if (totalBytes > maxBytes) {
+        req.destroy();
+        reject(new Error("Body too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
     req.on("error", reject);
   });

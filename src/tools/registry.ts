@@ -17,6 +17,7 @@
  */
 
 import { z } from "zod";
+import { zodToJsonSchema as convertZodSchema } from "zod-to-json-schema";
 import type {
   PermissionLevel,
   PermissionMode,
@@ -222,92 +223,39 @@ export class ToolRegistry {
       );
     }
 
-    // No callback in default mode → allow (headless operation)
-    return true;
+    // No callback in default mode → DENY (fail-closed)
+    // Headless callers must explicitly use "auto" mode if they want unattended execution.
+    console.warn(
+      `[Permission] Tool "${tool.name}" denied: permission_mode="default" requires ` +
+      `an interactive prompt, but no TTY is available. Use --auto or permission_mode="auto" ` +
+      `for headless operation.`
+    );
+    return false;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Convert Zod schema to JSON Schema (simplified)
+// Convert Zod schema to JSON Schema (using zod-to-json-schema library)
 // ---------------------------------------------------------------------------
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function zodToJsonSchema(schema: z.ZodType<unknown, any, any>): ToolDefinition["input_schema"] {
-  // For ZodObject, extract properties
-  if (schema instanceof z.ZodObject) {
-    const shape = schema.shape as Record<string, z.ZodType<unknown>>;
-    const properties: Record<string, unknown> = {};
-    const required: string[] = [];
+  const jsonSchema = convertZodSchema(schema, {
+    target: "openApi3",  // Produces clean output compatible with LLM APIs
+    $refStrategy: "none", // Inline everything, no $ref
+  });
 
-    for (const [key, value] of Object.entries(shape)) {
-      properties[key] = zodTypeToJsonSchema(value);
+  // Ensure top-level has type: "object"
+  if (typeof jsonSchema === "object" && jsonSchema !== null) {
+    const obj = jsonSchema as Record<string, unknown>;
+    // Remove $schema metadata that LLMs don't need
+    delete obj.$schema;
+    delete obj.additionalProperties;
 
-      // Check if field is required (not optional)
-      const isOptional =
-        value instanceof z.ZodOptional ||
-        value instanceof z.ZodDefault ||
-        (value instanceof z.ZodUnion &&
-          value.options.some((o: z.ZodType<unknown>) => o instanceof z.ZodUndefined));
-
-      if (!isOptional) {
-        required.push(key);
-      }
-    }
-
-    return {
-      type: "object",
-      properties,
-      required: required.length > 0 ? required : undefined,
-    };
+    return obj as ToolDefinition["input_schema"];
   }
 
   return { type: "object", properties: {} };
-}
-
-function zodTypeToJsonSchema(type: z.ZodType<unknown>): unknown {
-  if (type instanceof z.ZodString) {
-    const schema: Record<string, unknown> = { type: "string" };
-    if (type.description) schema.description = type.description;
-    return schema;
-  }
-  if (type instanceof z.ZodNumber) {
-    const schema: Record<string, unknown> = { type: "number" };
-    if (type.description) schema.description = type.description;
-    return schema;
-  }
-  if (type instanceof z.ZodBoolean) {
-    const schema: Record<string, unknown> = { type: "boolean" };
-    if (type.description) schema.description = type.description;
-    return schema;
-  }
-  if (type instanceof z.ZodArray) {
-    return {
-      type: "array",
-      items: zodTypeToJsonSchema(type.element),
-      ...(type.description ? { description: type.description } : {}),
-    };
-  }
-  if (type instanceof z.ZodEnum) {
-    return {
-      type: "string",
-      enum: type.options,
-      ...(type.description ? { description: type.description } : {}),
-    };
-  }
-  if (type instanceof z.ZodOptional) {
-    return zodTypeToJsonSchema(type.unwrap());
-  }
-  if (type instanceof z.ZodDefault) {
-    const inner = zodTypeToJsonSchema(type.removeDefault());
-    const schema = inner as Record<string, unknown>;
-    schema.default = type._def.defaultValue();
-    return schema;
-  }
-  if (type instanceof z.ZodObject) {
-    return zodToJsonSchema(type);
-  }
-  // Fallback
-  return { type: "string" };
 }
 
 // Singleton registry

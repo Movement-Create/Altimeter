@@ -1,24 +1,18 @@
 /**
- * Bash tool — execute shell commands.
+ * Bash tool — execute shell commands via sandbox manager.
  *
  * Security: This is the highest-risk tool. It requires "execute" permission.
  * In plan mode, commands are logged but not executed.
- * Timeout is enforced to prevent runaway processes.
- *
- * Design: We capture stdout+stderr as a combined stream, capped to MAX_OUTPUT
- * characters to avoid blowing the context window.
+ * All execution goes through the SandboxManager for defense-in-depth.
  */
 
 import { z } from "zod";
-import { exec } from "child_process";
-import { promisify } from "util";
 import { ok, err } from "./base.js";
 import type { Tool, ToolExecutionContext, ToolExecuteResult } from "./base.js";
+import { sandboxManager } from "../security/sandbox.js";
 
-const execAsync = promisify(exec);
-
-const MAX_OUTPUT = 50_000; // characters
-const DEFAULT_TIMEOUT_MS = 30_000; // 30 seconds
+const MAX_OUTPUT = 50_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 const BashInputSchema = z.object({
   command: z.string().describe("The shell command to execute"),
@@ -48,45 +42,32 @@ export const bashTool: Tool<BashInput> = {
     }
 
     const cwd = input.cwd ?? context.cwd;
-    const timeout = input.timeout_ms ?? DEFAULT_TIMEOUT_MS;
 
-    try {
-      const { stdout, stderr } = await execAsync(input.command, {
-        cwd,
-        timeout,
-        env: { ...process.env, ...context.env },
-        maxBuffer: MAX_OUTPUT * 2, // bytes
-      });
+    const result = await sandboxManager.exec(input.command, cwd, context.env);
 
-      let output = "";
-      if (stdout.trim()) output += stdout;
-      if (stderr.trim()) output += (output ? "\n[stderr]\n" : "") + stderr;
+    if (result.blocked) {
+      return err(`[Blocked] ${result.blockReason}`);
+    }
 
-      if (!output.trim()) output = "(command produced no output)";
+    let output = "";
+    if (result.stdout.trim()) output += result.stdout;
+    if (result.stderr.trim()) output += (output ? "\n[stderr]\n" : "") + result.stderr;
 
-      // Truncate if too large
-      if (output.length > MAX_OUTPUT) {
-        output = output.slice(0, MAX_OUTPUT) + `\n...[truncated, ${output.length - MAX_OUTPUT} chars omitted]`;
-      }
+    if (result.timedOut) {
+      output += "\n[Timed out after " + (input.timeout_ms ?? DEFAULT_TIMEOUT_MS) + "ms]";
+    }
 
-      return ok(output);
-    } catch (e: unknown) {
-      const error = e as { code?: number; stdout?: string; stderr?: string; message?: string };
+    if (!output.trim()) output = "(command produced no output)";
 
-      // Non-zero exit code: still return output + error message
-      let output = "";
-      if (error.stdout?.trim()) output += error.stdout;
-      if (error.stderr?.trim())
-        output += (output ? "\n[stderr]\n" : "") + error.stderr;
+    if (output.length > MAX_OUTPUT) {
+      output = output.slice(0, MAX_OUTPUT) + `\n...[truncated, ${output.length - MAX_OUTPUT} chars omitted]`;
+    }
 
-      const msg = error.message ?? String(e);
-      output += (output ? "\n" : "") + `Exit code: ${error.code ?? "unknown"}\n${msg}`;
-
-      if (output.length > MAX_OUTPUT) {
-        output = output.slice(0, MAX_OUTPUT) + "\n...[truncated]";
-      }
-
+    if (result.exitCode !== 0) {
+      output += `\nExit code: ${result.exitCode}`;
       return err(output);
     }
+
+    return ok(output);
   },
 };
