@@ -1,0 +1,9 @@
+node_modules/
+dist/
+sessions/
+memory/*.md
+!memory/facts.md
+!memory/index.md
+.env
+*.log
+.DS_Store
