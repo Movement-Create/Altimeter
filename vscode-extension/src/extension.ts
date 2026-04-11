@@ -39,6 +39,33 @@ export function activate(context: vscode.ExtensionContext) {
   // Register all commands
   registerCommands(context, runner, chatProvider, statusBar, outputChannel);
 
+  // First-run API key check
+  const altConfig = vscode.workspace.getConfiguration('altimeter');
+  const hasSettingsKey =
+    altConfig.get<string>('googleApiKey', '') ||
+    altConfig.get<string>('anthropicApiKey', '') ||
+    altConfig.get<string>('openaiApiKey', '');
+  const hasEnvKey =
+    process.env.GOOGLE_API_KEY ||
+    process.env.ANTHROPIC_API_KEY ||
+    process.env.OPENAI_API_KEY;
+
+  if (!hasSettingsKey && !hasEnvKey) {
+    vscode.window
+      .showWarningMessage(
+        'Altimeter: No API key configured. Set one in Settings to use the agent.',
+        'Open Settings'
+      )
+      .then((selection) => {
+        if (selection === 'Open Settings') {
+          vscode.commands.executeCommand(
+            'workbench.action.openSettings',
+            'altimeter api key'
+          );
+        }
+      });
+  }
+
   outputChannel.appendLine('Altimeter extension activated.');
 }
 

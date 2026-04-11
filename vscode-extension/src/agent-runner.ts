@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 
 export interface RunResult {
   text: string;
@@ -48,11 +49,19 @@ export class AgentRunner {
 
   private getAltimeterPath(): string {
     const config = this.getConfig();
-    if (config.altimeterPath && fs.existsSync(config.altimeterPath)) {
-      return config.altimeterPath;
+    const searched: string[] = [];
+
+    // 1. Check explicit setting
+    if (config.altimeterPath) {
+      if (fs.existsSync(config.altimeterPath)) {
+        return config.altimeterPath;
+      }
+      searched.push(`altimeter.altimeterPath setting: ${config.altimeterPath} (not found)`);
+    } else {
+      searched.push('altimeter.altimeterPath setting (not set)');
     }
 
-    // Try to find altimeter relative to workspace
+    // 2. Try to find altimeter relative to workspace
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (workspaceFolders) {
       for (const folder of workspaceFolders) {
@@ -60,29 +69,45 @@ export class AgentRunner {
         if (fs.existsSync(candidate)) {
           return folder.uri.fsPath;
         }
+        searched.push(`Workspace: ${folder.uri.fsPath} (no dist/index.js)`);
       }
+    } else {
+      searched.push('Workspace folders (none open)');
     }
 
-    // Try common locations
+    // 3. Check parent directory of the extension itself (repo root)
+    const extensionRoot = path.resolve(__dirname, '..', '..');
+    if (fs.existsSync(path.join(extensionRoot, 'dist', 'index.js'))) {
+      return extensionRoot;
+    }
+    searched.push(`Extension parent: ${extensionRoot} (no dist/index.js)`);
+
+    // 4. Try common locations using os.homedir() for cross-platform support
+    const home = os.homedir();
     const commonPaths = [
-      path.join(process.env.HOME || '', 'Altimeter'),
-      path.join(process.env.HOME || '', 'altimeter'),
-      '/home/user/workspace/Altimeter',
+      path.join(home, 'Altimeter'),
+      path.join(home, 'altimeter'),
     ];
 
     for (const p of commonPaths) {
       if (fs.existsSync(path.join(p, 'dist', 'index.js'))) {
         return p;
       }
+      searched.push(`${p} (not found)`);
     }
 
+    // Store searched paths for the error message
+    this._lastSearchedPaths = searched;
     return '';
   }
 
+  private _lastSearchedPaths: string[] = [];
+
   private buildEnv(provider: string): NodeJS.ProcessEnv {
     const config = this.getConfig();
-    const env = { ...process.env };
+    const env: Record<string, string> = { ...process.env } as Record<string, string>;
 
+    // VS Code settings override env vars
     if (config.googleApiKey) {
       env['GOOGLE_API_KEY'] = config.googleApiKey;
       env['GEMINI_API_KEY'] = config.googleApiKey;
@@ -102,8 +127,9 @@ export class AgentRunner {
     const altimeterDir = this.getAltimeterPath();
 
     if (!altimeterDir) {
+      const paths = this._lastSearchedPaths.map(p => `  - ${p}`).join('\n');
       throw new Error(
-        'Altimeter installation not found. Set altimeter.altimeterPath in settings.'
+        `Altimeter installation not found. Searched:\n${paths}\nSet altimeter.altimeterPath in VS Code settings to your Altimeter install directory.`
       );
     }
 
@@ -175,7 +201,20 @@ export class AgentRunner {
         this.outputChannel.appendLine(`\n[Altimeter] Process exited with code ${code}`);
 
         if (code !== 0) {
-          reject(new Error(`Altimeter exited with code ${code}. Stderr: ${stderr.slice(0, 500)}`));
+          let friendlyHint = '';
+          if (/API error 403|PERMISSION_DENIED/i.test(stderr)) {
+            friendlyHint = 'API key is missing or invalid. Check your Altimeter settings.';
+          } else if (/ENOENT|not found/i.test(stderr)) {
+            friendlyHint = 'Altimeter CLI not found. Check altimeter.altimeterPath setting.';
+          } else if (/ECONNREFUSED|ETIMEDOUT/i.test(stderr)) {
+            friendlyHint = 'Network error. Check your internet connection.';
+          }
+
+          const stderrSnippet = stderr.slice(0, 2000);
+          const hint = friendlyHint ? `\n\n${friendlyHint}` : '';
+          reject(new Error(
+            `Altimeter exited with code ${code}. Stderr: ${stderrSnippet}${hint}\n\nSee full details: View → Output → Altimeter`
+          ));
           return;
         }
 
