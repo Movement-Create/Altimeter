@@ -37,6 +37,10 @@ import { webFetchTool } from "./web-fetch.js";
 import { webSearchTool } from "./web-search.js";
 import { agentTool } from "./agent.js";
 import { todoTool } from "./todo.js";
+import { codeRunTool } from "./code-run.js";
+import { docCreateTool } from "./doc-create.js";
+import { spreadsheetCreateTool } from "./spreadsheet-create.js";
+import { csvWriteTool } from "./csv-write.js";
 
 // Permission hierarchy (higher index = more dangerous)
 const PERMISSION_RANK: Record<PermissionLevel, number> = {
@@ -77,6 +81,10 @@ export class ToolRegistry {
     this.register(webSearchTool);
     this.register(agentTool);
     this.register(todoTool);
+    this.register(codeRunTool);
+    this.register(docCreateTool);
+    this.register(spreadsheetCreateTool);
+    this.register(csvWriteTool);
   }
 
   /**
