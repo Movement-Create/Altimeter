@@ -115,7 +115,7 @@ describe("fileWriteTool", () => {
   it("writes a new file", async () => {
     const ctx = makeContext();
     const result = await fileWriteTool.execute(
-      { path: "new-file.txt", content: "Hello, World!" },
+      { path: "new-file.txt", content: "Hello, World!", create_dirs: true, append: false },
       ctx
     );
     expect(result.is_error).toBe(false);
@@ -129,7 +129,7 @@ describe("fileWriteTool", () => {
   it("creates parent directories automatically", async () => {
     const ctx = makeContext();
     const result = await fileWriteTool.execute(
-      { path: "deep/nested/dir/file.txt", content: "nested!" },
+      { path: "deep/nested/dir/file.txt", content: "nested!", create_dirs: true, append: false },
       ctx
     );
     expect(result.is_error).toBe(false);
@@ -137,9 +137,9 @@ describe("fileWriteTool", () => {
 
   it("appends to existing file", async () => {
     const ctx = makeContext();
-    await fileWriteTool.execute({ path: "append-test.txt", content: "line1\n" }, ctx);
+    await fileWriteTool.execute({ path: "append-test.txt", content: "line1\n", create_dirs: true, append: false }, ctx);
     const result = await fileWriteTool.execute(
-      { path: "append-test.txt", content: "line2\n", append: true },
+      { path: "append-test.txt", content: "line2\n", create_dirs: true, append: true },
       ctx
     );
     expect(result.is_error).toBe(false);
@@ -152,7 +152,7 @@ describe("fileWriteTool", () => {
   it("returns plan description in plan mode", async () => {
     const ctx = makeContext({ plan_mode: true });
     const result = await fileWriteTool.execute(
-      { path: "test.txt", content: "content" },
+      { path: "test.txt", content: "content", create_dirs: true, append: false },
       ctx
     );
     expect(result.output).toContain("[PLAN MODE]");
@@ -168,7 +168,7 @@ describe("fileEditTool", () => {
   it("replaces a string in a file", async () => {
     const ctx = makeContext();
     await fileWriteTool.execute(
-      { path: "edit-test.ts", content: 'const x = "old value";\n' },
+      { path: "edit-test.ts", content: 'const x = "old value";\n', create_dirs: true, append: false },
       ctx
     );
 
@@ -177,6 +177,7 @@ describe("fileEditTool", () => {
         path: "edit-test.ts",
         old_string: '"old value"',
         new_string: '"new value"',
+        replace_all: false,
       },
       ctx
     );
@@ -194,6 +195,7 @@ describe("fileEditTool", () => {
         path: "hello.ts",
         old_string: "this string does not exist in the file",
         new_string: "replacement",
+        replace_all: false,
       },
       ctx
     );
@@ -204,12 +206,12 @@ describe("fileEditTool", () => {
   it("fails when multiple occurrences without replace_all", async () => {
     const ctx = makeContext();
     await fileWriteTool.execute(
-      { path: "multi.ts", content: "const x = 1;\nconst x = 1;\n" },
+      { path: "multi.ts", content: "const x = 1;\nconst x = 1;\n", create_dirs: true, append: false },
       ctx
     );
 
     const result = await fileEditTool.execute(
-      { path: "multi.ts", old_string: "const x = 1;", new_string: "const y = 2;" },
+      { path: "multi.ts", old_string: "const x = 1;", new_string: "const y = 2;", replace_all: false },
       ctx
     );
     expect(result.is_error).toBe(true);
@@ -219,7 +221,7 @@ describe("fileEditTool", () => {
   it("replaces all with replace_all=true", async () => {
     const ctx = makeContext();
     await fileWriteTool.execute(
-      { path: "multi2.ts", content: "const x = 1;\nconst x = 1;\n" },
+      { path: "multi2.ts", content: "const x = 1;\nconst x = 1;\n", create_dirs: true, append: false },
       ctx
     );
 
@@ -246,7 +248,7 @@ describe("fileEditTool", () => {
 describe("globTool", () => {
   it("finds TypeScript files", async () => {
     const ctx = makeContext();
-    const result = await globTool.execute({ pattern: "*.ts" }, ctx);
+    const result = await globTool.execute({ pattern: "*.ts", ignore: ["node_modules/**", ".git/**", "dist/**", "*.min.*"] }, ctx);
     expect(result.is_error).toBe(false);
     expect(result.output).toContain("hello.ts");
     expect(result.output).toContain("world.ts");
@@ -255,7 +257,7 @@ describe("globTool", () => {
 
   it("finds files recursively with **", async () => {
     const ctx = makeContext();
-    const result = await globTool.execute({ pattern: "**/*.ts" }, ctx);
+    const result = await globTool.execute({ pattern: "**/*.ts", ignore: ["node_modules/**", ".git/**", "dist/**", "*.min.*"] }, ctx);
     expect(result.is_error).toBe(false);
     expect(result.output).toContain("hello.ts");
     expect(result.output).toContain("index.ts"); // in src/
@@ -263,7 +265,7 @@ describe("globTool", () => {
 
   it("returns no matches message for non-matching pattern", async () => {
     const ctx = makeContext();
-    const result = await globTool.execute({ pattern: "*.xyz" }, ctx);
+    const result = await globTool.execute({ pattern: "*.xyz", ignore: ["node_modules/**", ".git/**", "dist/**", "*.min.*"] }, ctx);
     expect(result.is_error).toBe(false);
     expect(result.output).toContain("No files matched");
   });
@@ -277,7 +279,7 @@ describe("grepTool", () => {
   it("finds pattern in files", async () => {
     const ctx = makeContext();
     const result = await grepTool.execute(
-      { pattern: "greeting", path: testDir },
+      { pattern: "greeting", path: testDir, ignore_case: false, context: 2, output_mode: "content" as const },
       ctx
     );
     expect(result.is_error).toBe(false);
@@ -287,7 +289,7 @@ describe("grepTool", () => {
   it("returns no matches for missing pattern", async () => {
     const ctx = makeContext();
     const result = await grepTool.execute(
-      { pattern: "ZZZNOMATCH9999", path: testDir },
+      { pattern: "ZZZNOMATCH9999", path: testDir, ignore_case: false, context: 2, output_mode: "content" as const },
       ctx
     );
     expect(result.is_error).toBe(false);
@@ -297,7 +299,7 @@ describe("grepTool", () => {
   it("returns files_with_matches mode", async () => {
     const ctx = makeContext();
     const result = await grepTool.execute(
-      { pattern: "const", path: testDir, output_mode: "files_with_matches" },
+      { pattern: "const", path: testDir, ignore_case: false, context: 2, output_mode: "files_with_matches" as const },
       ctx
     );
     expect(result.is_error).toBe(false);
@@ -307,7 +309,7 @@ describe("grepTool", () => {
   it("handles invalid regex", async () => {
     const ctx = makeContext();
     const result = await grepTool.execute(
-      { pattern: "[invalid(regex", path: testDir },
+      { pattern: "[invalid(regex", path: testDir, ignore_case: false, context: 2, output_mode: "content" as const },
       ctx
     );
     expect(result.is_error).toBe(true);

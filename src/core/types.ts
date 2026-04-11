@@ -187,6 +187,8 @@ export interface AgentRunOptions {
   system_prompt?: string;
   /** Initial message history (for resume) */
   history?: Message[];
+  /** Enable streaming for text responses */
+  streaming?: boolean;
   /** Called on each assistant text chunk (streaming) */
   onText?: (chunk: string) => void;
   /** Called before each tool execution */

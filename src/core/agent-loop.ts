@@ -27,14 +27,12 @@ import { registry } from "../tools/registry.js";
 import { hookEngine } from "../hooks/engine.js";
 import { router } from "../providers/router.js";
 import type { ToolExecutionContext } from "../tools/base.js";
-import { assembleContext } from "./context.js";
-
-// Inject agent runner into the agent tool (avoids circular import at module load)
-import { setAgentRunner } from "../tools/agent.js";
+import { assembleContext, compressContext, estimateContextTokens, getContextLimit } from "./context.js";
+import { withRetry } from "./retry.js";
+import { auditLogger } from "../security/audit.js";
+import { costTracker } from "./cost-tracker.js";
 
 export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult> {
-  // Break circular dep: inject self as the subagent runner
-  setAgentRunner(runAgent);
 
   const { session } = options;
   const { provider, model: resolvedModel } = router.resolve(
@@ -64,6 +62,14 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
   let totalOutputTokens = 0;
   let lastText = "";
 
+  // Audit: session start
+  await auditLogger.logRaw("SessionStart", {
+    session_id: session.id,
+    model: resolvedModel,
+    provider: session.provider,
+    permission_mode: session.permission_mode,
+  });
+
   // ──────────────────────────────────────────────────
   // THE LOOP
   // ──────────────────────────────────────────────────
@@ -73,14 +79,28 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     // Get tool definitions for this session
     const tools = registry.getToolDefinitions(session);
 
-    // Call the LLM
-    const response = await provider.complete({
-      model: resolvedModel,
-      messages,
-      system: systemPrompt,
-      tools: tools.length > 0 ? tools : undefined,
-      max_tokens: 8192,
-    });
+    // Compress context if approaching window limit
+    const compressedMessages = compressContext(messages, resolvedModel, session.provider);
+
+    // Call the LLM with retry logic
+    const response = await withRetry(
+      () => provider.complete({
+        model: resolvedModel,
+        messages: compressedMessages,
+        system: systemPrompt,
+        tools: tools.length > 0 ? tools : undefined,
+        max_tokens: 8192,
+        stream: options.streaming ?? false,
+      }),
+      {
+        maxRetries: 3,
+        onRetry: (attempt, error, delayMs) => {
+          if (options.onText) {
+            options.onText(`\n[Retry ${attempt}/3 after ${Math.round(delayMs / 1000)}s: ${String(error).slice(0, 100)}]\n`);
+          }
+        },
+      }
+    );
 
     totalInputTokens += response.usage.input_tokens;
     totalOutputTokens += response.usage.output_tokens;
@@ -100,6 +120,22 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     );
 
     if (estimatedCost > session.max_budget_usd) {
+      await auditLogger.logRaw("SessionEnd", {
+        session_id: session.id,
+        turns,
+        cost_usd: estimatedCost,
+        stop_reason: "max_budget",
+      });
+      await costTracker.record({
+        timestamp: new Date().toISOString(),
+        session_id: session.id,
+        model: resolvedModel,
+        provider: session.provider,
+        input_tokens: totalInputTokens,
+        output_tokens: totalOutputTokens,
+        cost_usd: estimatedCost,
+        turns,
+      });
       return buildResult(
         `[Budget exceeded: $${estimatedCost.toFixed(4)} > $${session.max_budget_usd}]\n\n${lastText}`,
         turns,
@@ -129,6 +165,23 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         role: "assistant",
         content: lastText,
         timestamp: new Date().toISOString(),
+      });
+
+      await auditLogger.logRaw("SessionEnd", {
+        session_id: session.id,
+        turns,
+        cost_usd: estimatedCost,
+        stop_reason: "text",
+      });
+      await costTracker.record({
+        timestamp: new Date().toISOString(),
+        session_id: session.id,
+        model: resolvedModel,
+        provider: session.provider,
+        input_tokens: totalInputTokens,
+        output_tokens: totalOutputTokens,
+        cost_usd: estimatedCost,
+        turns,
       });
 
       return buildResult(
@@ -201,6 +254,19 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         toolContext
       );
 
+      // Audit log
+      await auditLogger.log("ToolExecution", {
+        event: "PostToolUse",
+        session_id: session.id,
+        turn: turns,
+        tool_call: effectiveCall,
+        tool_result: {
+          tool_use_id: call.id,
+          content: toolResult.output.slice(0, 500),
+          is_error: toolResult.is_error,
+        },
+      });
+
       const result: ToolResult = {
         tool_use_id: call.id,
         content: toolResult.output,
@@ -244,12 +310,30 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
   }
 
   // Hit max_turns
+  const maxTurnsCost = provider.estimateCost(resolvedModel, totalInputTokens, totalOutputTokens);
+  await auditLogger.logRaw("SessionEnd", {
+    session_id: session.id,
+    turns,
+    cost_usd: maxTurnsCost,
+    stop_reason: "max_turns",
+  });
+  await costTracker.record({
+    timestamp: new Date().toISOString(),
+    session_id: session.id,
+    model: resolvedModel,
+    provider: session.provider,
+    input_tokens: totalInputTokens,
+    output_tokens: totalOutputTokens,
+    cost_usd: maxTurnsCost,
+    turns,
+  });
+
   return buildResult(
     lastText || "[Max turns reached without a final response]",
     turns,
     totalInputTokens,
     totalOutputTokens,
-    provider.estimateCost(resolvedModel, totalInputTokens, totalOutputTokens),
+    maxTurnsCost,
     "max_turns",
     messages
   );

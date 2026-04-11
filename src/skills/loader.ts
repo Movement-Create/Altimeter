@@ -52,9 +52,12 @@ export class SkillLoader {
         continue;
       }
 
-      const matches = skill.trigger_patterns.some((pattern) =>
-        lowerPrompt.includes(pattern.toLowerCase())
-      );
+      const matches = skill.trigger_patterns.some((pattern) => {
+        // Use word boundary matching to avoid false positives
+        const escaped = pattern.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const regex = new RegExp(`\\b${escaped}\\b`, "i");
+        return regex.test(lowerPrompt);
+      });
 
       if (matches) {
         relevant.push(skill);

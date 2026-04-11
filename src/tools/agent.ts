@@ -19,17 +19,6 @@
 import { z } from "zod";
 import { ok, err } from "./base.js";
 import type { Tool, ToolExecutionContext, ToolExecuteResult } from "./base.js";
-import type { AgentRunOptions, AgentRunResult } from "../core/types.js";
-
-// We'll import the agent loop at runtime to avoid circular deps
-// The actual runner is injected by the registry
-let _runAgent: ((opts: AgentRunOptions) => Promise<AgentRunResult>) | null = null;
-
-export function setAgentRunner(
-  runner: (opts: AgentRunOptions) => Promise<AgentRunResult>
-): void {
-  _runAgent = runner;
-}
 
 const AgentInputSchema = z.object({
   prompt: z.string().describe("The task to assign to the subagent"),
@@ -68,12 +57,9 @@ export const agentTool: Tool<AgentInput> = {
       return ok(`[PLAN MODE] Would spawn subagent for: "${input.prompt.slice(0, 100)}..."`);
     }
 
-    if (!_runAgent) {
-      return err("Agent runner not initialized. This is a configuration error.");
-    }
+    // Lazy import to break circular dependency
+    const { runAgent } = await import("../core/agent-loop.js");
 
-    // Create a derived session config for the subagent
-    const { randomUUID } = await import("crypto");
     const subSessionId = `sub_${context.session.id}_${Date.now()}`;
 
     const subSession = {
@@ -90,7 +76,7 @@ export const agentTool: Tool<AgentInput> = {
     };
 
     try {
-      const result = await _runAgent({
+      const result = await runAgent({
         prompt: input.prompt,
         session: subSession,
         system_prompt: input.system_prompt,

@@ -26,10 +26,49 @@ import { memoryManager } from "../memory/manager.js";
 
 // Approximate token counts (rough: 1 token ≈ 4 chars)
 const CHARS_PER_TOKEN = 4;
-const MODEL_CONTEXT_LIMIT = 200_000; // tokens (conservative for Claude)
 const MICRO_COMPACT_THRESHOLD = 0.70;
 const SUMMARIZE_THRESHOLD = 0.85;
 const TRUNCATE_THRESHOLD = 0.95;
+
+// ---------------------------------------------------------------------------
+// Dynamic context limits per model
+// ---------------------------------------------------------------------------
+
+const MODEL_CONTEXT_LIMITS: Record<string, number> = {
+  // Anthropic
+  "claude-3-5-sonnet-20241022": 200_000,
+  "claude-3-5-haiku-20241022": 200_000,
+  "claude-3-opus-20240229": 200_000,
+  "claude-sonnet-4-20250514": 200_000,
+  "claude-opus-4-6": 200_000,
+  // OpenAI
+  "gpt-4o": 128_000,
+  "gpt-4o-mini": 128_000,
+  "o1-preview": 128_000,
+  "o1": 200_000,
+  // Google
+  "gemini-2.5-pro": 1_000_000,
+  "gemini-2.5-flash": 1_000_000,
+  "gemini-2.0-flash-lite": 1_000_000,
+  // Ollama (conservative defaults)
+  "llama3.1": 128_000,
+  "llama3.2": 128_000,
+  "llama3.1:70b": 128_000,
+};
+
+const DEFAULT_CONTEXT_LIMIT = 128_000;
+
+export function getContextLimit(model: string, provider?: string): number {
+  // Exact match first
+  if (MODEL_CONTEXT_LIMITS[model]) return MODEL_CONTEXT_LIMITS[model];
+
+  // Prefix match
+  for (const [key, limit] of Object.entries(MODEL_CONTEXT_LIMITS)) {
+    if (model.startsWith(key.split("-").slice(0, 2).join("-"))) return limit;
+  }
+
+  return DEFAULT_CONTEXT_LIMIT;
+}
 
 export async function assembleContext(
   options: AgentRunOptions,
@@ -134,9 +173,14 @@ export function estimateContextTokens(messages: Message[]): number {
  * Apply context compression if needed.
  * Returns the (potentially modified) messages array.
  */
-export function compressContext(messages: Message[]): Message[] {
+export function compressContext(
+  messages: Message[],
+  model?: string,
+  provider?: string
+): Message[] {
+  const contextLimit = getContextLimit(model ?? "", provider);
   const totalTokens = estimateContextTokens(messages);
-  const ratio = totalTokens / MODEL_CONTEXT_LIMIT;
+  const ratio = totalTokens / contextLimit;
 
   if (ratio < MICRO_COMPACT_THRESHOLD) {
     return messages; // No compression needed

@@ -114,12 +114,17 @@ program
       registry.setPermissionCallback(createInteractivePermissionCallback());
     }
 
+    let textWasStreamed = false;
+
     try {
       const result = await runAgent({
         prompt,
         session,
         system_prompt: opts.system,
-        onText: opts.json ? undefined : (chunk) => process.stdout.write(chunk),
+        onText: opts.json ? undefined : (chunk) => {
+          process.stdout.write(chunk);
+          textWasStreamed = true;
+        },
         onToolCall: opts.json
           ? undefined
           : (call) => {
@@ -139,9 +144,10 @@ program
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
       } else {
-        if (!result.text.includes(result.text)) {
-          // Text was streamed, add newline
-          console.log();
+        if (textWasStreamed) {
+          console.log(); // newline after streamed text
+        } else {
+          console.log(result.text);
         }
         printStats(result.turns, result.usage, result.cost_usd);
       }
