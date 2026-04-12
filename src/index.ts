@@ -105,8 +105,8 @@ program
     const session = await sessionManager.createSession(config);
 
     if (!opts.json) {
-      console.log(chalk.dim(`Session: ${session.id}`));
-      console.log(chalk.dim(`Model: ${config.model} (${config.provider})\n`));
+      process.stderr.write(chalk.dim(`Session: ${session.id}\n`));
+      process.stderr.write(chalk.dim(`Model: ${config.model} (${config.provider})\n\n`));
     }
 
     // Set up interactive permission callback
@@ -128,15 +128,18 @@ program
         onToolCall: opts.json
           ? undefined
           : (call) => {
-              console.log(chalk.cyan(`\n[Tool] ${call.name}`));
+              process.stderr.write(chalk.cyan(`\n[Tool] ${call.name}\n`));
               const inputStr = JSON.stringify(call.input, null, 2);
-              if (inputStr.length < 200) console.log(chalk.dim(inputStr));
+              if (inputStr.length < 200) process.stderr.write(chalk.dim(inputStr) + '\n');
             },
         onToolResult: opts.json
           ? undefined
           : (result) => {
               if (result.is_error) {
-                console.log(chalk.red(`[Error] ${result.content.slice(0, 100)}`));
+                process.stderr.write(chalk.red(`[Error] ${result.content.slice(0, 100)}\n`));
+              } else {
+                const preview = result.content.length > 200 ? result.content.slice(0, 200) + '...' : result.content;
+                process.stderr.write(chalk.dim(`[ToolDone] ${preview}\n`));
               }
             },
       });
@@ -416,9 +419,9 @@ function printStats(
   usage: { input: number; output: number },
   cost: number
 ): void {
-  console.log(
+  process.stderr.write(
     chalk.dim(
-      `[${turns} turn${turns !== 1 ? "s" : ""} · ${usage.input + usage.output} tokens · $${cost.toFixed(4)}]`
+      `[${turns} turn${turns !== 1 ? "s" : ""} · ${usage.input + usage.output} tokens · $${cost.toFixed(4)}]\n`
     )
   );
 }

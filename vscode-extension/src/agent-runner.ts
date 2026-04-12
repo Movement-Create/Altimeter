@@ -257,7 +257,11 @@ export class AgentRunner {
               continue;
             }
             // Skip common CLI status lines
-            if (trimmed.startsWith('[tool:') || trimmed.startsWith('---') || trimmed.startsWith('===')) {
+            if (trimmed.startsWith('[tool:') || trimmed.startsWith('[Tool]') || trimmed.startsWith('---') || trimmed.startsWith('===')) {
+              continue;
+            }
+            // Skip session/model metadata and stats lines
+            if (trimmed.startsWith('Session:') || trimmed.startsWith('Model:') || /^\[\d+ turns?\s/.test(trimmed)) {
               continue;
             }
             // This is text content — forward it
@@ -272,7 +276,9 @@ export class AgentRunner {
         stderr += chunk;
         this.outputChannel.append(`[stderr] ${chunk}`);
         if (options.onStderr) {
-          options.onStderr(chunk);
+          // Strip ANSI escape codes so consumers get clean text
+          const clean = chunk.replace(/\x1b\[[0-9;]*m/g, '');
+          options.onStderr(clean);
         }
       });
 

@@ -111,11 +111,12 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
         onStdout: (chunk) => {
           this._parseAndForwardChunk(chunk);
         },
-        onStderr: () => {
-          // Log stderr to output channel only
+        onStderr: (chunk) => {
+          // Parse tool call and error events from stderr
+          this._parseStderrForTools(chunk);
         },
         onChunk: (text) => {
-          // Stream text chunks to the webview in real-time
+          this._streamingMessageStarted = true;
           this._postMessage({ type: 'streamChunk', text });
         },
       });
@@ -192,10 +193,15 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
   }
 
   private async _handleRequestFiles(query?: string): Promise<void> {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders || workspaceFolders.length === 0) {
+      this._postMessage({ type: 'fileList', files: [], noWorkspace: true });
+      return;
+    }
+
     try {
       const files = await vscode.workspace.findFiles('**/*', '**/node_modules/**', 50);
       const filePaths = files.map(f => vscode.workspace.asRelativePath(f));
-      // Filter by query if provided
       const filtered = query
         ? filePaths.filter(p => p.toLowerCase().includes(query.toLowerCase()))
         : filePaths;
@@ -209,8 +215,8 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
     let expanded = prompt;
     const contextBlocks: string[] = [];
 
-    // Handle @selection
-    if (expanded.includes('@selection')) {
+    // Handle /selection
+    if (expanded.includes('/selection')) {
       const editor = vscode.window.activeTextEditor;
       if (editor && !editor.selection.isEmpty) {
         const selectedText = editor.document.getText(editor.selection);
@@ -220,12 +226,14 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
         contextBlocks.push(
           `[Selected code from ${fileName} lines ${startLine}-${endLine}]\n\`\`\`\n${selectedText}\n\`\`\``
         );
-        expanded = expanded.replace(/@selection/g, '');
+        expanded = expanded.replace(/\/selection/g, '');
       }
     }
 
-    // Handle @file references — pattern: @path/to/file
-    const fileRefPattern = /@([\w./-]+\.\w+)/g;
+    // Handle /file references — pattern: /path/to/file.ext
+    // Must contain a directory separator or start from a known extension
+    // Requires at least one / in the path or a recognized code file extension
+    const fileRefPattern = /(?:^|\s)\/((?:[\w.-]+\/)*[\w.-]+\.(?:ts|tsx|js|jsx|json|css|html|md|py|rs|go|java|c|cpp|h|hpp|yaml|yml|toml|xml|sql|sh|bash|env|txt|cfg|conf|ini|lock|prisma|graphql|proto|vue|svelte))\b/g;
     let match;
     const fileRefs: string[] = [];
     while ((match = fileRefPattern.exec(expanded)) !== null) {
@@ -249,7 +257,7 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
       } catch {
         // File not found, skip
       }
-      expanded = expanded.replace(new RegExp(`@${filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'), filePath);
+      expanded = expanded.replace(new RegExp(`\\/${filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'), filePath);
     }
 
     if (contextBlocks.length > 0) {
@@ -260,8 +268,7 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
   }
 
   private _parseAndForwardChunk(chunk: string): void {
-    // Look for tool call patterns in the output
-    // These are heuristic matches based on common Altimeter output formats
+    // Look for tool call patterns in the output (legacy lowercase format)
     const toolCallPattern = /\[tool:([^\]]+)\]/g;
     let match;
     while ((match = toolCallPattern.exec(chunk)) !== null) {
@@ -270,6 +277,70 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
         name: match[1],
         input: {},
       });
+    }
+  }
+
+  private _lastToolName = '';
+  private _lastToolInput = '';
+
+  private _parseStderrForTools(chunk: string): void {
+    const lines = chunk.split('\n');
+    for (const line of lines) {
+      const clean = line.trim();
+      if (!clean) continue;
+
+      // Match [Tool] tool_name
+      const toolMatch = clean.match(/^\[Tool\]\s+(\S+)/);
+      if (toolMatch) {
+        this._lastToolName = toolMatch[1];
+        this._lastToolInput = '';
+        this._postMessage({
+          type: 'toolCall',
+          name: toolMatch[1],
+          input: {},
+        });
+        continue;
+      }
+
+      // Match [ToolDone] result preview
+      const doneMatch = clean.match(/^\[ToolDone\]\s*(.*)/);
+      if (doneMatch) {
+        this._postMessage({
+          type: 'toolResult',
+          name: this._lastToolName,
+          output: doneMatch[1] || '',
+          isError: false,
+        });
+        continue;
+      }
+
+      // Match [Error] message
+      const errorMatch = clean.match(/^\[Error\]\s+(.+)/);
+      if (errorMatch) {
+        this._postMessage({
+          type: 'toolResult',
+          name: this._lastToolName,
+          output: errorMatch[1],
+          isError: true,
+        });
+        continue;
+      }
+
+      // Lines between [Tool] and [ToolDone]/[Error] are tool input (JSON)
+      if (this._lastToolName && !clean.startsWith('[')) {
+        this._lastToolInput += clean + '\n';
+        // Try to parse as JSON and send as input update
+        try {
+          const input = JSON.parse(this._lastToolInput.trim());
+          this._postMessage({
+            type: 'toolInput',
+            name: this._lastToolName,
+            input,
+          });
+        } catch {
+          // Incomplete JSON, wait for more lines
+        }
+      }
     }
   }
 
@@ -302,9 +373,21 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
 <body>
   <div id="app">
     <div id="header">
-      <span class="logo">⌀</span>
+      <span class="logo">
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <circle cx="8" cy="8" r="6"/>
+          <line x1="8" y1="2" x2="8" y2="8"/>
+          <line x1="8" y1="8" x2="12" y2="6"/>
+        </svg>
+      </span>
       <span class="title">Altimeter</span>
-      <button id="clearBtn" class="icon-btn" title="Clear chat">$(trash)</button>
+      <div class="header-actions">
+        <button id="clearBtn" class="icon-btn" title="Clear chat" aria-label="Clear chat">
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor">
+            <path d="M11 1.75V3h2.25a.75.75 0 010 1.5H2.75a.75.75 0 010-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75zM6.5 1.75V3h3V1.75a.25.25 0 00-.25-.25h-2.5a.25.25 0 00-.25.25zM3.613 5.5l.806 8.87A1.75 1.75 0 006.166 16h3.668a1.75 1.75 0 001.747-1.63l.806-8.87z"/>
+          </svg>
+        </button>
+      </div>
     </div>
 
     <div id="messages" role="log" aria-live="polite"></div>
@@ -319,40 +402,46 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
 
     <div id="input-area">
       <div id="toolbar">
-        <select id="modelSelect" aria-label="Model">
-          <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-          <option value="gemini-2.5-pro">gemini-2.5-pro</option>
-          <option value="claude-3-5-sonnet-20241022">claude-3.5-sonnet</option>
-          <option value="claude-3-5-haiku-20241022">claude-3.5-haiku</option>
-          <option value="gpt-4o">gpt-4o</option>
-          <option value="gpt-4o-mini">gpt-4o-mini</option>
-        </select>
-        <select id="modeSelect" aria-label="Mode">
-          <option value="auto">Auto</option>
-          <option value="default">Default</option>
-          <option value="plan">Plan</option>
-        </select>
-        <select id="effortSelect" aria-label="Effort">
-          <option value="medium">Medium</option>
-          <option value="low">Low</option>
-          <option value="high">High</option>
-        </select>
+        <div class="select-wrap">
+          <select id="modelSelect" aria-label="Model">
+            <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+            <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+            <option value="claude-3-5-sonnet-20241022">claude-3.5-sonnet</option>
+            <option value="claude-3-5-haiku-20241022">claude-3.5-haiku</option>
+            <option value="gpt-4o">gpt-4o</option>
+            <option value="gpt-4o-mini">gpt-4o-mini</option>
+          </select>
+        </div>
+        <div class="select-wrap">
+          <select id="modeSelect" aria-label="Mode">
+            <option value="auto">Auto</option>
+            <option value="default">Default</option>
+            <option value="plan">Plan</option>
+          </select>
+        </div>
+        <div class="select-wrap">
+          <select id="effortSelect" aria-label="Effort">
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+            <option value="high">High</option>
+          </select>
+        </div>
       </div>
       <div id="input-wrapper">
         <textarea
           id="messageInput"
-          placeholder="Ask Altimeter anything... (@ to reference files)"
+          placeholder="Ask anything... (/ to ref files)"
           rows="1"
           aria-label="Message input"
         ></textarea>
         <button id="sendBtn" title="Send (Enter)" aria-label="Send message">
-          <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor">
-            <path d="M8 1l7 7-7 7M15 8H1"/>
+          <svg viewBox="0 0 16 16" width="14" height="14">
+            <path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
       </div>
       <div id="file-autocomplete" class="hidden"></div>
-      <div id="input-hint">Enter to send · Shift+Enter for newline · @ to reference files</div>
+      <div id="input-hint">Enter to send · Shift+Enter for newline</div>
     </div>
   </div>
 
