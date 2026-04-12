@@ -25,6 +25,8 @@
   let streamingBubble = null;
   let streamingContent = '';
   let fileList = [];
+  let currentTurnId = 0;
+  let chatHistory = []; // { role, content } entries for state persistence
 
   // ── State ──────────────────────────────────────────────────────
 
@@ -33,11 +35,32 @@
     messageInput.disabled = isLoading;
   }
 
+  function saveState() {
+    vscode.setState({ chatHistory, messageCount });
+  }
+
+  function restoreState() {
+    const state = vscode.getState();
+    if (state && state.chatHistory && state.chatHistory.length > 0) {
+      chatHistory = state.chatHistory;
+      messageCount = state.messageCount || 0;
+      // Re-render saved messages without animation
+      messagesEl.innerHTML = '';
+      chatHistory.forEach((entry) => {
+        appendMessage(entry.role, entry.content, true);
+      });
+      return true;
+    }
+    return false;
+  }
+
   // ── Init ───────────────────────────────────────────────────────
 
   function init() {
-    // Show empty state
-    showEmptyState();
+    // Restore previous conversation or show empty state
+    if (!restoreState()) {
+      showEmptyState();
+    }
 
     // Auto-resize textarea
     messageInput.addEventListener('input', autoResize);
@@ -65,8 +88,8 @@
       effortSelect.addEventListener('change', sendConfigChange);
     }
 
-    // @file autocomplete
-    messageInput.addEventListener('input', handleAtMention);
+    // /file autocomplete
+    messageInput.addEventListener('input', handleSlashMention);
     messageInput.addEventListener('keydown', handleAutocompleteNav);
 
     // Notify extension we're ready
@@ -78,9 +101,11 @@
   // ── Auto-resize textarea ────────────────────────────────────────
 
   function autoResize() {
-    messageInput.style.height = 'auto';
-    const newHeight = Math.min(messageInput.scrollHeight, 120);
-    messageInput.style.height = newHeight + 'px';
+    requestAnimationFrame(() => {
+      messageInput.style.height = 'auto';
+      const newHeight = Math.min(messageInput.scrollHeight, 120);
+      messageInput.style.height = newHeight + 'px';
+    });
   }
 
   // ── Send message ───────────────────────────────────────────────
@@ -111,6 +136,8 @@
   function clearChat() {
     messagesEl.innerHTML = '';
     messageCount = 0;
+    chatHistory = [];
+    saveState();
     showEmptyState();
   }
 
@@ -125,27 +152,31 @@
     });
   }
 
-  // ── @file autocomplete ─────────────────────────────────────────
+  // ── /file autocomplete ─────────────────────────────────────────
 
   let autocompleteActive = false;
   let autocompleteIndex = 0;
-  let atStartPos = -1;
+  let slashStartPos = -1;
 
-  function handleAtMention() {
+  function handleSlashMention() {
     const value = messageInput.value;
     const cursorPos = messageInput.selectionStart;
 
-    // Find the last @ before cursor
+    // Find the last / before cursor that starts a file reference
     const beforeCursor = value.slice(0, cursorPos);
-    const lastAt = beforeCursor.lastIndexOf('@');
+    const lastSlash = beforeCursor.lastIndexOf('/');
 
-    if (lastAt >= 0) {
-      const textAfterAt = beforeCursor.slice(lastAt + 1);
-      // Only trigger if no spaces in the text after @ (it's a path)
-      if (!textAfterAt.includes(' ') && textAfterAt !== 'selection') {
-        atStartPos = lastAt;
-        vscode.postMessage({ type: 'requestFiles', query: textAfterAt });
-        return;
+    if (lastSlash >= 0) {
+      // Only trigger if / is at start or preceded by a space (not mid-path)
+      const charBefore = lastSlash > 0 ? beforeCursor[lastSlash - 1] : ' ';
+      if (charBefore === ' ' || lastSlash === 0) {
+        const textAfterSlash = beforeCursor.slice(lastSlash + 1);
+        // Only trigger if no spaces in the text after / (it's a path)
+        if (!textAfterSlash.includes(' ') && textAfterSlash !== 'selection') {
+          slashStartPos = lastSlash;
+          vscode.postMessage({ type: 'requestFiles', query: textAfterSlash });
+          return;
+        }
       }
     }
 
@@ -177,26 +208,55 @@
     }
   }
 
-  function showAutocomplete(files) {
-    if (!fileAutocomplete || files.length === 0) {
+  function showAutocomplete(files, noWorkspace) {
+    if (!fileAutocomplete) {
+      hideAutocomplete();
+      return;
+    }
+
+    if (noWorkspace) {
+      fileAutocomplete.innerHTML = '';
+      fileAutocomplete.removeAttribute('role');
+      const hint = document.createElement('div');
+      hint.classList.add('autocomplete-item');
+      hint.classList.add('autocomplete-hint');
+      hint.textContent = 'Open a folder to reference files';
+      fileAutocomplete.appendChild(hint);
+      fileAutocomplete.classList.remove('hidden');
+      return;
+    }
+
+    if (files.length === 0) {
       hideAutocomplete();
       return;
     }
 
     fileAutocomplete.innerHTML = '';
+    fileAutocomplete.setAttribute('role', 'listbox');
+    fileAutocomplete.id = 'file-autocomplete';
     autocompleteIndex = 0;
     autocompleteActive = true;
 
     files.forEach((filePath, idx) => {
       const item = document.createElement('div');
       item.classList.add('autocomplete-item');
-      if (idx === 0) item.classList.add('active');
+      item.setAttribute('role', 'option');
+      item.id = 'autocomplete-opt-' + idx;
+      if (idx === 0) {
+        item.classList.add('active');
+        item.setAttribute('aria-selected', 'true');
+      } else {
+        item.setAttribute('aria-selected', 'false');
+      }
       item.dataset.path = filePath;
       item.textContent = filePath;
       item.addEventListener('click', () => insertFileRef(filePath));
       fileAutocomplete.appendChild(item);
     });
 
+    messageInput.setAttribute('aria-expanded', 'true');
+    messageInput.setAttribute('aria-activedescendant', 'autocomplete-opt-0');
+    messageInput.setAttribute('aria-controls', 'file-autocomplete');
     fileAutocomplete.classList.remove('hidden');
   }
 
@@ -204,23 +264,30 @@
     if (fileAutocomplete) {
       fileAutocomplete.classList.add('hidden');
       fileAutocomplete.innerHTML = '';
+      fileAutocomplete.removeAttribute('role');
     }
+    messageInput.removeAttribute('aria-expanded');
+    messageInput.removeAttribute('aria-activedescendant');
+    messageInput.removeAttribute('aria-controls');
     autocompleteActive = false;
-    atStartPos = -1;
+    slashStartPos = -1;
   }
 
   function updateAutocompleteHighlight(items) {
     items.forEach((item, idx) => {
-      item.classList.toggle('active', idx === autocompleteIndex);
+      const isActive = idx === autocompleteIndex;
+      item.classList.toggle('active', isActive);
+      item.setAttribute('aria-selected', String(isActive));
     });
+    messageInput.setAttribute('aria-activedescendant', 'autocomplete-opt-' + autocompleteIndex);
   }
 
   function insertFileRef(filePath) {
     const value = messageInput.value;
-    const before = value.slice(0, atStartPos);
+    const before = value.slice(0, slashStartPos);
     const after = value.slice(messageInput.selectionStart);
-    messageInput.value = before + '@' + filePath + ' ' + after;
-    messageInput.selectionStart = messageInput.selectionEnd = atStartPos + filePath.length + 2;
+    messageInput.value = before + '/' + filePath + ' ' + after;
+    messageInput.selectionStart = messageInput.selectionEnd = slashStartPos + filePath.length + 2;
     hideAutocomplete();
     messageInput.focus();
   }
@@ -270,6 +337,11 @@
         contentEl.innerHTML = renderMarkdown(streamingContent);
         attachCopyButtons(contentEl);
       }
+      // Save streamed message to history
+      if (streamingContent) {
+        chatHistory.push({ role: 'assistant', content: streamingContent });
+        saveState();
+      }
     }
     streamingBubble = null;
     streamingContent = '';
@@ -277,7 +349,7 @@
 
   // ── Message rendering ──────────────────────────────────────────
 
-  function appendMessage(role, content) {
+  function appendMessage(role, content, skipSave) {
     messageCount++;
 
     const wrapper = document.createElement('div');
@@ -301,6 +373,12 @@
     wrapper.appendChild(meta);
     wrapper.appendChild(contentEl);
     messagesEl.appendChild(wrapper);
+
+    // Persist to state (skip during restore to avoid re-saving)
+    if (!skipSave) {
+      chatHistory.push({ role, content });
+      saveState();
+    }
 
     scrollToBottom();
     return wrapper;
@@ -337,11 +415,12 @@
   }
 
   function appendToolCall(data) {
-    // Find last assistant message, or create a container
-    let container = messagesEl.querySelector('.tool-calls-container:last-child');
+    // Group tool calls by turn — reuse existing container for the same turn
+    let container = messagesEl.querySelector(`.tool-calls-container[data-turn="${currentTurnId}"]`);
     if (!container) {
       container = document.createElement('div');
       container.classList.add('tool-calls-container');
+      container.dataset.turn = String(currentTurnId);
       messagesEl.appendChild(container);
     }
 
@@ -391,18 +470,64 @@
     return { details, status, body };
   }
 
-  function updateToolResult(toolName, output, isError) {
-    // Find the last tool call with this name that has 'running...' status
-    const toolCalls = messagesEl.querySelectorAll(`.tool-call[data-tool="${CSS.escape(toolName)}"]`);
-    let target = null;
-    for (const tc of toolCalls) {
-      const statusEl = tc.querySelector('.tool-status');
-      if (statusEl && statusEl.textContent === 'running...') {
-        target = tc;
-        break;
+  function findRunningToolCall(toolName) {
+    // Find by name first, fall back to any running tool call
+    if (toolName) {
+      const toolCalls = messagesEl.querySelectorAll(`.tool-call[data-tool="${CSS.escape(toolName)}"]`);
+      for (const tc of toolCalls) {
+        const statusEl = tc.querySelector('.tool-status');
+        if (statusEl && statusEl.textContent === 'running...') {
+          return tc;
+        }
       }
     }
+    // Fallback: find any running tool call
+    const allCalls = messagesEl.querySelectorAll('.tool-call');
+    for (const tc of allCalls) {
+      const statusEl = tc.querySelector('.tool-status');
+      if (statusEl && statusEl.textContent === 'running...') {
+        return tc;
+      }
+    }
+    return null;
+  }
 
+  function updateToolInput(toolName, input) {
+    const target = findRunningToolCall(toolName);
+    if (!target) return;
+
+    const body = target.querySelector('.tool-body');
+    if (!body) return;
+
+    // Replace existing input or add new
+    let inputSection = body.querySelector('.tool-input-section');
+    if (!inputSection) {
+      inputSection = document.createElement('div');
+      inputSection.classList.add('tool-input-section');
+
+      const label = document.createElement('div');
+      label.classList.add('tool-section-label');
+      label.textContent = 'Input';
+
+      const code = document.createElement('div');
+      code.classList.add('tool-code');
+
+      inputSection.appendChild(label);
+      inputSection.appendChild(code);
+      body.insertBefore(inputSection, body.firstChild);
+    }
+
+    const code = inputSection.querySelector('.tool-code');
+    if (code) {
+      const inputStr = typeof input === 'string' ? input : JSON.stringify(input, null, 2);
+      code.textContent = inputStr.length > 2000 ? inputStr.slice(0, 2000) + '...' : inputStr;
+    }
+
+    scrollToBottom();
+  }
+
+  function updateToolResult(toolName, output, isError) {
+    const target = findRunningToolCall(toolName);
     if (!target) return;
 
     const statusEl = target.querySelector('.tool-status');
@@ -431,8 +556,14 @@
     const emptyState = document.createElement('div');
     emptyState.classList.add('empty-state');
     emptyState.innerHTML = `
-      <div class="logo-large">⌀</div>
-      <p>Start a conversation with Altimeter. Ask anything, or select code in the editor and right-click to explain or fix it.</p>
+      <div class="logo-large">
+        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <circle cx="12" cy="12" r="9"/>
+          <line x1="12" y1="3" x2="12" y2="12"/>
+          <line x1="12" y1="12" x2="18" y2="9"/>
+        </svg>
+      </div>
+      <p>Ask anything, or select code and right-click to explain or fix it.</p>
     `;
     messagesEl.appendChild(emptyState);
   }
@@ -444,6 +575,7 @@
     setState();
 
     if (active) {
+      currentTurnId++;
       loadingBar.classList.remove('hidden');
       loadingText.textContent = 'Thinking...';
     } else {
@@ -553,26 +685,22 @@
         continue;
       }
 
-      // Unordered lists
-      if (line.match(/^[-*+] /)) {
-        const items = [];
-        while (i < lines.length && lines[i].match(/^[-*+] /)) {
-          items.push(`<li>${inlineMarkdown(lines[i].slice(2))}</li>`);
+      // Unordered lists (with nesting support)
+      if (line.match(/^(\s*)[-*+] /)) {
+        html += parseList(lines, i, 'ul');
+        // Advance past all list lines (including nested)
+        while (i < lines.length && lines[i].match(/^(\s*)[-*+] /) || (i < lines.length && lines[i].match(/^\s+\S/) && i > 0 && lines[i - 1].match(/^(\s*)[-*+] /))) {
           i++;
         }
-        html += `<ul>${items.join('')}</ul>\n`;
         continue;
       }
 
-      // Ordered lists
-      const olMatch = line.match(/^(\d+)\. /);
-      if (olMatch) {
-        const items = [];
-        while (i < lines.length && lines[i].match(/^\d+\. /)) {
-          items.push(`<li>${inlineMarkdown(lines[i].replace(/^\d+\. /, ''))}</li>`);
+      // Ordered lists (with nesting support)
+      if (line.match(/^(\s*)\d+\. /)) {
+        html += parseList(lines, i, 'ol');
+        while (i < lines.length && lines[i].match(/^(\s*)\d+\. /) || (i < lines.length && lines[i].match(/^\s+\S/) && i > 0 && lines[i - 1].match(/^(\s*)\d+\. /))) {
           i++;
         }
-        html += `<ol>${items.join('')}</ol>\n`;
         continue;
       }
 
@@ -596,6 +724,56 @@
     }
 
     return html;
+  }
+
+  function parseList(lines, startIdx, listType) {
+    // Collect list items with their indent levels
+    const items = [];
+    let idx = startIdx;
+    const bulletRe = /^(\s*)([-*+])\s+(.*)/;
+    const orderedRe = /^(\s*)(\d+)\.\s+(.*)/;
+    const re = listType === 'ul' ? bulletRe : orderedRe;
+
+    while (idx < lines.length) {
+      const m = lines[idx].match(re);
+      if (m) {
+        items.push({ indent: m[1].length, text: m[3] });
+        idx++;
+      } else if (lines[idx].match(/^\s+\S/) && items.length > 0) {
+        // Continuation line — append to previous item
+        items[items.length - 1].text += ' ' + lines[idx].trim();
+        idx++;
+      } else {
+        break;
+      }
+    }
+
+    // Build nested HTML from flat indent list
+    function buildNested(items, pos, baseIndent) {
+      let html = `<${listType}>`;
+      while (pos < items.length && items[pos].indent >= baseIndent) {
+        if (items[pos].indent === baseIndent) {
+          html += `<li>${inlineMarkdown(items[pos].text)}`;
+          pos++;
+          // Check if next items are deeper (nested)
+          if (pos < items.length && items[pos].indent > baseIndent) {
+            const result = buildNested(items, pos, items[pos].indent);
+            html += result.html;
+            pos = result.pos;
+          }
+          html += '</li>';
+        } else {
+          // Deeper than expected — start sublist
+          const result = buildNested(items, pos, items[pos].indent);
+          html += result.html;
+          pos = result.pos;
+        }
+      }
+      html += `</${listType}>`;
+      return { html, pos };
+    }
+
+    return buildNested(items, 0, items.length > 0 ? items[0].indent : 0).html + '\n';
   }
 
   function inlineMarkdown(text) {
@@ -676,6 +854,11 @@
         break;
       }
 
+      case 'toolInput': {
+        updateToolInput(msg.name, msg.input);
+        break;
+      }
+
       case 'toolResult': {
         updateToolResult(msg.name, msg.output, msg.isError);
         break;
@@ -695,7 +878,7 @@
       }
 
       case 'fileList': {
-        showAutocomplete(msg.files || []);
+        showAutocomplete(msg.files || [], msg.noWorkspace);
         break;
       }
     }
