@@ -126,12 +126,33 @@ export class GoogleProvider extends BaseProvider {
     return undefined;
   }
 
+  /**
+   * Recursively strip fields that Gemini's function declaration schema
+   * does not support (additionalProperties, $schema, $ref, etc.).
+   */
+  private sanitizeSchema(schema: unknown): unknown {
+    if (typeof schema !== "object" || schema === null) return schema;
+    if (Array.isArray(schema)) return schema.map((item) => this.sanitizeSchema(item));
+
+    const obj = schema as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+
+    const unsupported = new Set(["additionalProperties", "$schema", "$ref", "$defs", "allOf", "anyOf", "oneOf", "not", "default", "examples"]);
+
+    for (const [key, val] of Object.entries(obj)) {
+      if (unsupported.has(key)) continue;
+      out[key] = this.sanitizeSchema(val);
+    }
+
+    return out;
+  }
+
   private convertTools(tools: ToolDefinition[]): unknown {
     return {
       functionDeclarations: tools.map((t) => ({
         name: t.name,
         description: t.description,
-        parameters: t.input_schema,
+        parameters: this.sanitizeSchema(t.input_schema),
       })),
     };
   }
