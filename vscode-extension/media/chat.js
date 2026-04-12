@@ -15,9 +15,16 @@
   const loadingText = document.getElementById('loading-text');
   const cancelBtn = document.getElementById('cancelBtn');
   const clearBtn = document.getElementById('clearBtn');
+  const modelSelect = document.getElementById('modelSelect');
+  const modeSelect = document.getElementById('modeSelect');
+  const effortSelect = document.getElementById('effortSelect');
+  const fileAutocomplete = document.getElementById('file-autocomplete');
 
   let isLoading = false;
   let messageCount = 0;
+  let streamingBubble = null;
+  let streamingContent = '';
+  let fileList = [];
 
   // ── State ──────────────────────────────────────────────────────
 
@@ -46,6 +53,21 @@
     sendBtn.addEventListener('click', sendMessage);
     cancelBtn.addEventListener('click', cancelRun);
     clearBtn.addEventListener('click', clearChat);
+
+    // Toolbar config change listeners
+    if (modelSelect) {
+      modelSelect.addEventListener('change', sendConfigChange);
+    }
+    if (modeSelect) {
+      modeSelect.addEventListener('change', sendConfigChange);
+    }
+    if (effortSelect) {
+      effortSelect.addEventListener('change', sendConfigChange);
+    }
+
+    // @file autocomplete
+    messageInput.addEventListener('input', handleAtMention);
+    messageInput.addEventListener('keydown', handleAutocompleteNav);
 
     // Notify extension we're ready
     vscode.postMessage({ type: 'ready' });
@@ -90,6 +112,167 @@
     messagesEl.innerHTML = '';
     messageCount = 0;
     showEmptyState();
+  }
+
+  // ── Toolbar config ──────────────────────────────────────────────
+
+  function sendConfigChange() {
+    vscode.postMessage({
+      type: 'configChange',
+      model: modelSelect ? modelSelect.value : undefined,
+      mode: modeSelect ? modeSelect.value : undefined,
+      effort: effortSelect ? effortSelect.value : undefined,
+    });
+  }
+
+  // ── @file autocomplete ─────────────────────────────────────────
+
+  let autocompleteActive = false;
+  let autocompleteIndex = 0;
+  let atStartPos = -1;
+
+  function handleAtMention() {
+    const value = messageInput.value;
+    const cursorPos = messageInput.selectionStart;
+
+    // Find the last @ before cursor
+    const beforeCursor = value.slice(0, cursorPos);
+    const lastAt = beforeCursor.lastIndexOf('@');
+
+    if (lastAt >= 0) {
+      const textAfterAt = beforeCursor.slice(lastAt + 1);
+      // Only trigger if no spaces in the text after @ (it's a path)
+      if (!textAfterAt.includes(' ') && textAfterAt !== 'selection') {
+        atStartPos = lastAt;
+        vscode.postMessage({ type: 'requestFiles', query: textAfterAt });
+        return;
+      }
+    }
+
+    hideAutocomplete();
+  }
+
+  function handleAutocompleteNav(e) {
+    if (!autocompleteActive) return;
+
+    const items = fileAutocomplete.querySelectorAll('.autocomplete-item');
+    if (!items.length) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      autocompleteIndex = Math.min(autocompleteIndex + 1, items.length - 1);
+      updateAutocompleteHighlight(items);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      autocompleteIndex = Math.max(autocompleteIndex - 1, 0);
+      updateAutocompleteHighlight(items);
+    } else if (e.key === 'Enter' && autocompleteActive) {
+      e.preventDefault();
+      const selected = items[autocompleteIndex];
+      if (selected) {
+        insertFileRef(selected.dataset.path);
+      }
+    } else if (e.key === 'Escape') {
+      hideAutocomplete();
+    }
+  }
+
+  function showAutocomplete(files) {
+    if (!fileAutocomplete || files.length === 0) {
+      hideAutocomplete();
+      return;
+    }
+
+    fileAutocomplete.innerHTML = '';
+    autocompleteIndex = 0;
+    autocompleteActive = true;
+
+    files.forEach((filePath, idx) => {
+      const item = document.createElement('div');
+      item.classList.add('autocomplete-item');
+      if (idx === 0) item.classList.add('active');
+      item.dataset.path = filePath;
+      item.textContent = filePath;
+      item.addEventListener('click', () => insertFileRef(filePath));
+      fileAutocomplete.appendChild(item);
+    });
+
+    fileAutocomplete.classList.remove('hidden');
+  }
+
+  function hideAutocomplete() {
+    if (fileAutocomplete) {
+      fileAutocomplete.classList.add('hidden');
+      fileAutocomplete.innerHTML = '';
+    }
+    autocompleteActive = false;
+    atStartPos = -1;
+  }
+
+  function updateAutocompleteHighlight(items) {
+    items.forEach((item, idx) => {
+      item.classList.toggle('active', idx === autocompleteIndex);
+    });
+  }
+
+  function insertFileRef(filePath) {
+    const value = messageInput.value;
+    const before = value.slice(0, atStartPos);
+    const after = value.slice(messageInput.selectionStart);
+    messageInput.value = before + '@' + filePath + ' ' + after;
+    messageInput.selectionStart = messageInput.selectionEnd = atStartPos + filePath.length + 2;
+    hideAutocomplete();
+    messageInput.focus();
+  }
+
+  // ── Streaming ──────────────────────────────────────────────────
+
+  function handleStreamChunk(text) {
+    // Remove empty state if present
+    const emptyState = messagesEl.querySelector('.empty-state');
+    if (emptyState) emptyState.remove();
+
+    if (!streamingBubble) {
+      // Create a new assistant message bubble for streaming
+      messageCount++;
+      streamingBubble = document.createElement('div');
+      streamingBubble.classList.add('message', 'assistant', 'streaming');
+      streamingBubble.dataset.id = String(messageCount);
+
+      const meta = document.createElement('div');
+      meta.classList.add('message-meta');
+      meta.textContent = 'Altimeter';
+
+      const contentEl = document.createElement('div');
+      contentEl.classList.add('message-content');
+
+      streamingBubble.appendChild(meta);
+      streamingBubble.appendChild(contentEl);
+      messagesEl.appendChild(streamingBubble);
+      streamingContent = '';
+    }
+
+    streamingContent += text;
+    const contentEl = streamingBubble.querySelector('.message-content');
+    if (contentEl) {
+      contentEl.innerHTML = renderMarkdown(streamingContent);
+      attachCopyButtons(contentEl);
+    }
+    scrollToBottom();
+  }
+
+  function handleStreamEnd() {
+    if (streamingBubble) {
+      streamingBubble.classList.remove('streaming');
+      // Re-render final content with markdown
+      const contentEl = streamingBubble.querySelector('.message-content');
+      if (contentEl && streamingContent) {
+        contentEl.innerHTML = renderMarkdown(streamingContent);
+        attachCopyButtons(contentEl);
+      }
+    }
+    streamingBubble = null;
+    streamingContent = '';
   }
 
   // ── Message rendering ──────────────────────────────────────────
@@ -471,13 +654,17 @@
         const emptyState = messagesEl.querySelector('.empty-state');
         if (emptyState) emptyState.remove();
 
-        // Remove tool calls container (if any) before adding response
-        if (msg.role === 'assistant' || msg.role === 'error') {
-          const toolContainers = messagesEl.querySelectorAll('.tool-calls-container');
-          // Keep them in place — they show above the response
-        }
-
         appendMessage(msg.role, msg.content);
+        break;
+      }
+
+      case 'streamChunk': {
+        handleStreamChunk(msg.text);
+        break;
+      }
+
+      case 'streamEnd': {
+        handleStreamEnd();
         break;
       }
 
@@ -504,6 +691,11 @@
         if (msg.active && msg.message) {
           loadingText.textContent = msg.message;
         }
+        break;
+      }
+
+      case 'fileList': {
+        showAutocomplete(msg.files || []);
         break;
       }
     }

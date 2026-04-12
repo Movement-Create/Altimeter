@@ -517,3 +517,93 @@ body {
   margin-top: 4px;
   text-align: center;
 }
+
+/* ── Toolbar ────────────────────────────────────────────────── */
+#toolbar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+#toolbar select {
+  flex: 1;
+  min-width: 0;
+  background: var(--vscode-dropdown-background, var(--vscode-input-background));
+  color: var(--vscode-dropdown-foreground, var(--vscode-input-foreground));
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, rgba(128,128,128,0.3)));
+  border-radius: 3px;
+  padding: 3px 4px;
+  font-size: 11px;
+  font-family: var(--vscode-font-family);
+  cursor: pointer;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 8 8'%3E%3Cpath fill='%23888' d='M0 2l4 4 4-4z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 4px center;
+  padding-right: 14px;
+  text-overflow: ellipsis;
+}
+
+#toolbar select:focus {
+  border-color: var(--vscode-focusBorder, var(--vscode-button-background));
+}
+
+#toolbar select option {
+  background: var(--vscode-dropdown-background, var(--vscode-input-background));
+  color: var(--vscode-dropdown-foreground, var(--vscode-input-foreground));
+}
+
+/* ── Streaming ──────────────────────────────────────────────── */
+.message.streaming .message-content {
+  border-left: 2px solid var(--vscode-button-background);
+}
+
+.message.streaming .message-content::after {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 14px;
+  background: var(--vscode-editor-foreground);
+  opacity: 0.6;
+  margin-left: 2px;
+  animation: blink 800ms step-end infinite;
+  vertical-align: text-bottom;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+/* ── File Autocomplete ──────────────────────────────────────── */
+#file-autocomplete {
+  position: relative;
+  max-height: 150px;
+  overflow-y: auto;
+  background: var(--vscode-dropdown-background, var(--vscode-input-background));
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-input-border, rgba(128,128,128,0.3)));
+  border-radius: var(--radius);
+  z-index: 10;
+}
+
+#file-autocomplete.hidden {
+  display: none;
+}
+
+.autocomplete-item {
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--vscode-dropdown-foreground, var(--vscode-editor-foreground));
+}
+
+.autocomplete-item:hover,
+.autocomplete-item.active {
+  background: var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground));
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-editor-foreground));
+}

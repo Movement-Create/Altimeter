@@ -192,6 +192,19 @@
           "type": "string",
           "default": "",
           "description": "Path to Altimeter installation directory (leave blank for auto-detect)"
+        },
+        "altimeter.permissionRules": {
+          "type": "object",
+          "default": {
+            "file_read": "always",
+            "grep": "always",
+            "glob": "always",
+            "file_write": "ask",
+            "file_edit": "ask",
+            "bash": "ask",
+            "code_run": "ask"
+          },
+          "description": "Per-tool permission rules: 'always' (auto-approve), 'ask' (prompt), 'never' (block)"
         }
       }
     }

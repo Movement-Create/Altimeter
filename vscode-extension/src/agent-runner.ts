@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 
 export interface RunResult {
   text: string;
@@ -16,19 +17,38 @@ export interface AgentRunOptions {
   prompt: string;
   provider?: string;
   model?: string;
+  mode?: string;
   maxTurns?: number;
   maxBudget?: number;
   auto?: boolean;
   onStdout?: (data: string) => void;
   onStderr?: (data: string) => void;
+  onChunk?: (text: string) => void;
+  allowedTools?: string[];
+}
+
+export interface RunnerConfig {
+  model?: string;
+  provider?: string;
+  mode?: string;
+  effort?: string;
 }
 
 export class AgentRunner {
   private outputChannel: vscode.OutputChannel;
   private currentProcess: ChildProcess | null = null;
+  private _config: RunnerConfig = {};
 
   constructor(outputChannel: vscode.OutputChannel) {
     this.outputChannel = outputChannel;
+  }
+
+  setConfig(config: RunnerConfig): void {
+    this._config = { ...this._config, ...config };
+  }
+
+  getRunnerConfig(): RunnerConfig {
+    return { ...this._config };
   }
 
   private getConfig() {
@@ -48,11 +68,19 @@ export class AgentRunner {
 
   private getAltimeterPath(): string {
     const config = this.getConfig();
-    if (config.altimeterPath && fs.existsSync(config.altimeterPath)) {
-      return config.altimeterPath;
+    const searched: string[] = [];
+
+    // 1. Check explicit setting
+    if (config.altimeterPath) {
+      if (fs.existsSync(config.altimeterPath)) {
+        return config.altimeterPath;
+      }
+      searched.push(`altimeter.altimeterPath setting: ${config.altimeterPath} (not found)`);
+    } else {
+      searched.push('altimeter.altimeterPath setting (not set)');
     }
 
-    // Try to find altimeter relative to workspace
+    // 2. Try to find altimeter relative to workspace
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (workspaceFolders) {
       for (const folder of workspaceFolders) {
@@ -60,29 +88,45 @@ export class AgentRunner {
         if (fs.existsSync(candidate)) {
           return folder.uri.fsPath;
         }
+        searched.push(`Workspace: ${folder.uri.fsPath} (no dist/index.js)`);
       }
+    } else {
+      searched.push('Workspace folders (none open)');
     }
 
-    // Try common locations
+    // 3. Check parent directory of the extension itself (repo root)
+    const extensionRoot = path.resolve(__dirname, '..', '..');
+    if (fs.existsSync(path.join(extensionRoot, 'dist', 'index.js'))) {
+      return extensionRoot;
+    }
+    searched.push(`Extension parent: ${extensionRoot} (no dist/index.js)`);
+
+    // 4. Try common locations using os.homedir() for cross-platform support
+    const home = os.homedir();
     const commonPaths = [
-      path.join(process.env.HOME || '', 'Altimeter'),
-      path.join(process.env.HOME || '', 'altimeter'),
-      '/home/user/workspace/Altimeter',
+      path.join(home, 'Altimeter'),
+      path.join(home, 'altimeter'),
     ];
 
     for (const p of commonPaths) {
       if (fs.existsSync(path.join(p, 'dist', 'index.js'))) {
         return p;
       }
+      searched.push(`${p} (not found)`);
     }
 
+    // Store searched paths for the error message
+    this._lastSearchedPaths = searched;
     return '';
   }
 
+  private _lastSearchedPaths: string[] = [];
+
   private buildEnv(provider: string): NodeJS.ProcessEnv {
     const config = this.getConfig();
-    const env = { ...process.env };
+    const env: Record<string, string> = { ...process.env } as Record<string, string>;
 
+    // VS Code settings override env vars
     if (config.googleApiKey) {
       env['GOOGLE_API_KEY'] = config.googleApiKey;
       env['GEMINI_API_KEY'] = config.googleApiKey;
@@ -97,13 +141,38 @@ export class AgentRunner {
     return env;
   }
 
+  private getPermissionRules(): Record<string, string> {
+    const config = vscode.workspace.getConfiguration('altimeter');
+    return config.get<Record<string, string>>('permissionRules', {
+      file_read: 'always',
+      grep: 'always',
+      glob: 'always',
+      file_write: 'ask',
+      file_edit: 'ask',
+      bash: 'ask',
+      code_run: 'ask',
+    });
+  }
+
+  private buildAllowedTools(): string[] {
+    const rules = this.getPermissionRules();
+    const allowed: string[] = [];
+    for (const [tool, rule] of Object.entries(rules)) {
+      if (rule === 'always') {
+        allowed.push(tool);
+      }
+    }
+    return allowed;
+  }
+
   async run(options: AgentRunOptions): Promise<RunResult> {
     const config = this.getConfig();
     const altimeterDir = this.getAltimeterPath();
 
     if (!altimeterDir) {
+      const paths = this._lastSearchedPaths.map(p => `  - ${p}`).join('\n');
       throw new Error(
-        'Altimeter installation not found. Set altimeter.altimeterPath in settings.'
+        `Altimeter installation not found. Searched:\n${paths}\nSet altimeter.altimeterPath in VS Code settings to your Altimeter install directory.`
       );
     }
 
@@ -112,9 +181,11 @@ export class AgentRunner {
       throw new Error(`Altimeter index.js not found at: ${indexPath}`);
     }
 
-    const provider = options.provider || config.provider;
-    const model = options.model || config.model;
+    // Merge runner config overrides with options and settings
+    const provider = options.provider || this._config.provider || config.provider;
+    const model = options.model || this._config.model || config.model;
     const maxTurns = options.maxTurns || config.maxTurns;
+    const mode = options.mode || this._config.mode || 'auto';
     const auto = options.auto !== undefined ? options.auto : config.autoApprove;
 
     const args = [
@@ -124,11 +195,21 @@ export class AgentRunner {
       '--provider', provider,
       '--model', model,
       '--max-turns', String(maxTurns),
-      '--json',
     ];
 
-    if (auto) {
+    // Mode handling: Plan mode gets --plan, Auto mode gets --auto, Default uses permission rules
+    if (mode === 'plan') {
+      args.push('--plan');
       args.push('--auto');
+    } else if (mode === 'auto' || auto) {
+      args.push('--auto');
+    } else {
+      // Default mode: use --auto but restrict with allowed-tools from permission rules
+      args.push('--auto');
+      const allowedTools = options.allowedTools || this.buildAllowedTools();
+      if (allowedTools.length > 0) {
+        args.push('--allowed-tools', allowedTools.join(','));
+      }
     }
 
     if (options.maxBudget !== undefined) {
@@ -143,6 +224,7 @@ export class AgentRunner {
     return new Promise((resolve, reject) => {
       let stdout = '';
       let stderr = '';
+      let streamedText = '';
 
       const proc = spawn('node', args, {
         cwd: altimeterDir,
@@ -156,8 +238,32 @@ export class AgentRunner {
         const chunk = data.toString();
         stdout += chunk;
         this.outputChannel.append(chunk);
+
         if (options.onStdout) {
           options.onStdout(chunk);
+        }
+
+        // Streaming: detect text output vs JSON/tool-use and forward text chunks
+        if (options.onChunk) {
+          const lines = chunk.split('\n');
+          for (const line of lines) {
+            const trimmed = line.trim();
+            // Skip empty lines and JSON objects (tool calls, status messages)
+            if (!trimmed) {
+              continue;
+            }
+            if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+              // Likely JSON — skip for streaming text
+              continue;
+            }
+            // Skip common CLI status lines
+            if (trimmed.startsWith('[tool:') || trimmed.startsWith('---') || trimmed.startsWith('===')) {
+              continue;
+            }
+            // This is text content — forward it
+            streamedText += line + '\n';
+            options.onChunk(line + '\n');
+          }
         }
       });
 
@@ -175,44 +281,33 @@ export class AgentRunner {
         this.outputChannel.appendLine(`\n[Altimeter] Process exited with code ${code}`);
 
         if (code !== 0) {
-          reject(new Error(`Altimeter exited with code ${code}. Stderr: ${stderr.slice(0, 500)}`));
-          return;
-        }
-
-        // Parse JSON output — it may have other text before/after the JSON
-        const jsonMatch = stdout.match(/\{[\s\S]*"text"[\s\S]*\}/);
-        if (!jsonMatch) {
-          // Return a best-effort result with the raw text
-          resolve({
-            text: stdout.trim() || '(no output)',
-            turns: 0,
-            usage: { input: 0, output: 0 },
-            cost_usd: 0,
-            stop_reason: 'unknown',
-            messages: [],
-          });
-          return;
-        }
-
-        try {
-          const result = JSON.parse(jsonMatch[0]) as RunResult;
-          resolve(result);
-        } catch (e) {
-          // Try parsing the entire stdout as JSON
-          try {
-            const result = JSON.parse(stdout.trim()) as RunResult;
-            resolve(result);
-          } catch {
-            resolve({
-              text: stdout.trim(),
-              turns: 0,
-              usage: { input: 0, output: 0 },
-              cost_usd: 0,
-              stop_reason: 'parse_error',
-              messages: [],
-            });
+          let friendlyHint = '';
+          if (/API error 403|PERMISSION_DENIED/i.test(stderr)) {
+            friendlyHint = 'API key is missing or invalid. Check your Altimeter settings.';
+          } else if (/ENOENT|not found/i.test(stderr)) {
+            friendlyHint = 'Altimeter CLI not found. Check altimeter.altimeterPath setting.';
+          } else if (/ECONNREFUSED|ETIMEDOUT/i.test(stderr)) {
+            friendlyHint = 'Network error. Check your internet connection.';
           }
+
+          const stderrSnippet = stderr.slice(0, 2000);
+          const hint = friendlyHint ? `\n\n${friendlyHint}` : '';
+          reject(new Error(
+            `Altimeter exited with code ${code}. Stderr: ${stderrSnippet}${hint}\n\nSee full details: View → Output → Altimeter`
+          ));
+          return;
         }
+
+        // Try to parse structured JSON from the output.
+        // Without --json flag, the output is mostly text with possible JSON summary at end.
+        const parsed = this._parseRunOutput(stdout);
+
+        // If we streamed text and didn't get good parsed text, use the streamed content
+        if (streamedText.trim() && (!parsed.text || parsed.text === '(no output)' || parsed.text.trimStart().startsWith('{'))) {
+          parsed.text = streamedText.trim();
+        }
+
+        resolve(parsed);
       });
 
       proc.on('error', (err) => {
@@ -220,6 +315,84 @@ export class AgentRunner {
         reject(new Error(`Failed to start Altimeter: ${err.message}`));
       });
     });
+  }
+
+  private _parseRunOutput(stdout: string): RunResult {
+    const fallback: RunResult = {
+      text: stdout.trim() || '(no output)',
+      turns: 0,
+      usage: { input: 0, output: 0 },
+      cost_usd: 0,
+      stop_reason: 'unknown',
+      messages: [],
+    };
+
+    // Strategy 1: Try parsing entire stdout as JSON (most common case with --json)
+    try {
+      const result = JSON.parse(stdout.trim()) as RunResult;
+      if (result && typeof result.text === 'string') {
+        return result;
+      }
+    } catch {
+      // Not valid JSON as-is, try extraction
+    }
+
+    // Strategy 2: Find the outermost { ... } containing "text" field
+    // Use a balanced-brace approach instead of greedy regex
+    const textIdx = stdout.indexOf('"text"');
+    if (textIdx === -1) {
+      return fallback;
+    }
+
+    // Walk backwards from "text" to find the opening brace of the JSON object
+    let braceStart = -1;
+    for (let i = textIdx - 1; i >= 0; i--) {
+      if (stdout[i] === '{') {
+        braceStart = i;
+        break;
+      }
+    }
+    if (braceStart === -1) {
+      return fallback;
+    }
+
+    // Walk forward from braceStart counting braces to find the matching close
+    let depth = 0;
+    let braceEnd = -1;
+    for (let i = braceStart; i < stdout.length; i++) {
+      if (stdout[i] === '{') { depth++; }
+      else if (stdout[i] === '}') {
+        depth--;
+        if (depth === 0) {
+          braceEnd = i;
+          break;
+        }
+      }
+    }
+    if (braceEnd === -1) {
+      return fallback;
+    }
+
+    try {
+      const result = JSON.parse(stdout.slice(braceStart, braceEnd + 1)) as RunResult;
+      if (result && typeof result.text === 'string') {
+        return result;
+      }
+    } catch {
+      // Extraction failed
+    }
+
+    // Strategy 3: If stdout looks like raw JSON, try to extract just the text field
+    // This prevents showing raw JSON when parsing fails on the full object
+    if (stdout.trim().startsWith('{') && stdout.includes('"text"')) {
+      const textMatch = stdout.match(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (textMatch) {
+        fallback.text = JSON.parse(`"${textMatch[1]}"`);
+        fallback.stop_reason = 'parse_error';
+      }
+    }
+
+    return fallback;
   }
 
   async listTools(): Promise<string[]> {

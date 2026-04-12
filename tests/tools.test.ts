@@ -334,6 +334,10 @@ describe("ToolRegistry", () => {
     expect(tools).toContain("web_search");
     expect(tools).toContain("agent");
     expect(tools).toContain("todo_write");
+    expect(tools).toContain("code_run");
+    expect(tools).toContain("doc_create");
+    expect(tools).toContain("spreadsheet_create");
+    expect(tools).toContain("csv_write");
   });
 
   it("blocks tools in disallowed_tools", async () => {
