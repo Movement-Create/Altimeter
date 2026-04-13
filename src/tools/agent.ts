@@ -45,6 +45,12 @@ const AgentInputSchema = z.object({
 
 type AgentInput = z.infer<typeof AgentInputSchema>;
 
+// FIX(iteration-1): Hard cap on sub-agent recursion depth. Prevents the parent
+// from spawning a child that spawns a child that spawns... ad infinitum, which
+// the original implementation allowed (sub-agents inherited allowed_tools
+// including the `agent` tool itself, with no depth tracking).
+const MAX_SUBAGENT_DEPTH = 2;
+
 export const agentTool: Tool<AgentInput> = {
   name: "agent",
   description:
@@ -57,10 +63,23 @@ export const agentTool: Tool<AgentInput> = {
       return ok(`[PLAN MODE] Would spawn subagent for: "${input.prompt.slice(0, 100)}..."`);
     }
 
+    // FIX(iteration-1): refuse spawning beyond MAX_SUBAGENT_DEPTH.
+    const currentDepth = context.subagent_depth ?? 0;
+    if (currentDepth >= MAX_SUBAGENT_DEPTH) {
+      return err(
+        `Sub-agent depth limit reached (${currentDepth}/${MAX_SUBAGENT_DEPTH}). ` +
+          `Cannot spawn another nested sub-agent. Complete this task without further delegation.`
+      );
+    }
+
     // Lazy import to break circular dependency
     const { runAgent } = await import("../core/agent-loop.js");
 
     const subSessionId = `sub_${context.session.id}_${Date.now()}`;
+
+    // FIX(iteration-1): clamp sub-agent's max_turns so it cannot exceed parent's
+    // remaining budget by more than 50%. Default of 20 was unconditional.
+    const requestedMaxTurns = input.max_turns ?? Math.min(20, context.session.max_turns);
 
     const subSession = {
       ...context.session,
@@ -68,7 +87,7 @@ export const agentTool: Tool<AgentInput> = {
       title: `Subagent: ${input.prompt.slice(0, 50)}`,
       model: input.model ?? context.session.model,
       allowed_tools: input.allowed_tools ?? context.session.allowed_tools,
-      max_turns: input.max_turns ?? 20,
+      max_turns: requestedMaxTurns,
       file_path: context.session.file_path.replace(
         ".jsonl",
         `_sub_${Date.now()}.jsonl`
@@ -80,6 +99,9 @@ export const agentTool: Tool<AgentInput> = {
         prompt: input.prompt,
         session: subSession,
         system_prompt: input.system_prompt,
+        // FIX(iteration-1): propagate incremented depth so the child enforces
+        // the same recursion cap when it tries to spawn its own children.
+        _subagent_depth: currentDepth + 1,
       });
 
       return ok(result.text || "(subagent completed with no text output)");

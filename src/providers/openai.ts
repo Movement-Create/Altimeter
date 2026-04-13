@@ -32,13 +32,21 @@ const PRICING: Record<string, { input: number; output: number }> = {
 };
 
 export class OpenAIProvider extends BaseProvider {
-  private apiKey: string;
-  private baseUrl: string;
+  protected apiKey: string;
+  protected baseUrl: string;
 
-  constructor(apiKey?: string, baseUrl?: string) {
-    super("openai", "OpenAI");
+  constructor(
+    apiKey?: string,
+    baseUrl?: string,
+    id: string = "openai",
+    displayName: string = "OpenAI"
+  ) {
+    super(id, displayName);
     this.apiKey = apiKey ?? process.env.OPENAI_API_KEY ?? "";
-    this.baseUrl = baseUrl ?? DEFAULT_BASE_URL;
+    // FIX(iteration-2): allow OPENAI_BASE_URL env override so this provider
+    // can point at any OpenAI-compatible endpoint (Moonshot/Kimi, Groq,
+    // Together, Fireworks, local servers) without code changes.
+    this.baseUrl = baseUrl ?? process.env.OPENAI_BASE_URL ?? DEFAULT_BASE_URL;
   }
 
   /**
@@ -189,13 +197,15 @@ export class OpenAIProvider extends BaseProvider {
       usage: { prompt_tokens: number; completion_tokens: number };
     };
 
+    // FIX(iteration-2): defensive parse. Some OpenAI-compatible providers
+    // (observed: Kimi/Moonshot kimi-k2-0905-preview) return malformed or
+    // concatenated JSON in `arguments`, e.g. `{...}{...}` or a trailing
+    // garbage byte. Bare JSON.parse throws and kills the entire agent run.
+    // We try strict parse first, then a balanced-brace extractor for the
+    // first complete JSON object, then fall back to {} with a console warning.
     const choice = data.choices[0];
-    const toolCalls = (choice.message.tool_calls ?? []).map((tc) =>
-      makeToolCall(
-        tc.id,
-        tc.function.name,
-        JSON.parse(tc.function.arguments || "{}")
-      )
+    const toolCalls = (choice?.message?.tool_calls ?? []).map((tc) =>
+      makeToolCall(tc.id, tc.function.name, parseToolArguments(tc.function.arguments))
     );
 
     return {
@@ -286,5 +296,52 @@ export class OpenAIProvider extends BaseProvider {
 
   async validate(): Promise<boolean> {
     return this.apiKey.length > 0;
+  }
+}
+
+/**
+ * FIX(iteration-2): tolerant parser for tool-call argument strings.
+ * Order: strict JSON.parse → first balanced JSON object → empty object.
+ * Never throws — guarantees the agent loop survives malformed model output.
+ */
+function parseToolArguments(raw: string | undefined | null): Record<string, unknown> {
+  if (!raw || raw.trim() === "") return {};
+
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    // Walk the string, balance braces (respecting strings/escapes), extract
+    // the first complete object.
+    const start = raw.indexOf("{");
+    if (start === -1) return {};
+    let depth = 0;
+    let inStr = false;
+    let escape = false;
+    for (let i = start; i < raw.length; i++) {
+      const ch = raw[i];
+      if (escape) { escape = false; continue; }
+      if (ch === "\\") { escape = true; continue; }
+      if (ch === '"') { inStr = !inStr; continue; }
+      if (inStr) continue;
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          try {
+            const parsed = JSON.parse(raw.slice(start, i + 1));
+            return parsed && typeof parsed === "object"
+              ? (parsed as Record<string, unknown>)
+              : {};
+          } catch {
+            break;
+          }
+        }
+      }
+    }
+    process.stderr.write(
+      `[openai-provider] Failed to parse tool arguments; falling back to empty object. Raw: ${raw.slice(0, 200)}\n`
+    );
+    return {};
   }
 }

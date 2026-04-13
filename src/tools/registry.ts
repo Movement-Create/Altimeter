@@ -41,6 +41,8 @@ import { codeRunTool } from "./code-run.js";
 import { docCreateTool } from "./doc-create.js";
 import { spreadsheetCreateTool } from "./spreadsheet-create.js";
 import { csvWriteTool } from "./csv-write.js";
+import { memoryRecallTool } from "./memory-recall.js";
+import { memoryNoteTool } from "./memory-note.js";
 
 // Permission hierarchy (higher index = more dangerous)
 const PERMISSION_RANK: Record<PermissionLevel, number> = {
@@ -85,6 +87,8 @@ export class ToolRegistry {
     this.register(docCreateTool);
     this.register(spreadsheetCreateTool);
     this.register(csvWriteTool);
+    this.register(memoryRecallTool);
+    this.register(memoryNoteTool);
   }
 
   /**

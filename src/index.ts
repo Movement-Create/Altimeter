@@ -26,6 +26,7 @@ import { createInterface } from "readline";
 import { loadConfig } from "./config/loader.js";
 import { sessionManager } from "./core/session.js";
 import { runAgent } from "./core/agent-loop.js";
+import { runAgentWithReflection } from "./core/reflection.js";
 import { registry } from "./tools/registry.js";
 import { skillLoader } from "./skills/loader.js";
 import { memoryManager } from "./memory/manager.js";
@@ -117,7 +118,7 @@ program
     let textWasStreamed = false;
 
     try {
-      const result = await runAgent({
+      const result = await runAgentWithReflection({
         prompt,
         session,
         system_prompt: opts.system,
@@ -303,6 +304,58 @@ memoryCmd
     console.log(results);
   });
 
+memoryCmd
+  .command("prune")
+  .description("Ask the LLM to dedupe and prune stale entries from lessons.md")
+  .action(async () => {
+    const lessons = await memoryManager.loadLessons();
+    if (lessons.length === 0) {
+      console.log("No lessons to prune.");
+      return;
+    }
+
+    const config = await loadConfig();
+    const session = await sessionManager.createSession({
+      ...config,
+      permission_mode: "auto",
+      max_turns: 1,
+    });
+
+    const serialized = lessons
+      .map((l) => {
+        const tagStr = l.tags.length ? ` [${l.tags.join(", ")}]` : "";
+        return `## ${l.date}${tagStr}\n${l.content}`;
+      })
+      .join("\n\n");
+
+    const pruneInstructions =
+      "You are pruning a lessons-learned file. Read the entries below and return a CLEANED version that:\n" +
+      "1. Removes exact duplicates.\n" +
+      "2. Merges entries that say the same thing in different words (keep the most specific wording).\n" +
+      "3. Removes entries that are trivially obvious or clearly no longer relevant.\n" +
+      "4. Preserves the exact format: '## YYYY-MM-DD [tags]' header followed by the lesson body.\n" +
+      "5. Output ONLY the cleaned file contents, nothing else — no commentary, no code fences.\n\n" +
+      "Entries:\n\n" +
+      serialized;
+
+    console.log(chalk.dim(`Pruning ${lessons.length} lessons...`));
+
+    const result = await runAgent({
+      prompt: pruneInstructions,
+      session,
+    });
+
+    const cleaned =
+      "# Lessons Learned\n\nShort, dated notes the agent writes after mistakes or non-obvious wins.\n\n" +
+      result.text.trim() +
+      "\n";
+
+    await memoryManager.writeLessons(cleaned);
+    console.log(
+      chalk.green(`Pruned. Backup saved to memory/lessons.md.bak.`)
+    );
+  });
+
 // ---------------------------------------------------------------------------
 // Parse
 // ---------------------------------------------------------------------------
@@ -370,7 +423,7 @@ async function runChatSession(
 
     try {
       console.log(); // newline before response
-      const result = await runAgent({
+      const result = await runAgentWithReflection({
         prompt,
         session,
         history,

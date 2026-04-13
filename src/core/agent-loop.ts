@@ -46,6 +46,9 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     cwd,
     env: {},
     plan_mode: session.permission_mode === "plan",
+    // FIX(iteration-1): propagate sub-agent depth so the `agent` tool can
+    // enforce MAX_SUBAGENT_DEPTH against the actual call-tree depth.
+    subagent_depth: options._subagent_depth ?? 0,
   };
 
   // Build initial message history

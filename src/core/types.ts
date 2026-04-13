@@ -195,6 +195,12 @@ export interface AgentRunOptions {
   onToolCall?: (call: ToolCall) => void | Promise<void>;
   /** Called after each tool result */
   onToolResult?: (result: ToolResult) => void | Promise<void>;
+  /**
+   * FIX(iteration-1): Sub-agent recursion depth. Set by the `agent` tool when
+   * it spawns a child runAgent. 0/undefined = top-level. Used to enforce
+   * MAX_SUBAGENT_DEPTH across the call tree.
+   */
+  _subagent_depth?: number;
 }
 
 export interface AgentRunResult {

@@ -6,6 +6,7 @@
  *
  * Files:
  * - memory/facts.md     : Curated persistent facts about the user/project
+ * - memory/lessons.md   : Short lessons learned from past mistakes (tag-indexed)
  * - memory/YYYY-MM-DD.md: Daily conversation logs
  * - memory/index.md     : Searchable index with timestamps
  *
@@ -136,6 +137,23 @@ export class MemoryManager {
       // No facts file
     }
 
+    // Search lessons.md
+    const lessons = await this.loadLessons();
+    const lessonMatches = lessons.filter((l) => {
+      const hay = (l.content + " " + l.tags.join(" ")).toLowerCase();
+      return hay.includes(lowerQuery);
+    });
+    if (lessonMatches.length > 0) {
+      const rendered = lessonMatches
+        .slice(0, 10)
+        .map((l) => {
+          const tagStr = l.tags.length ? ` [${l.tags.join(", ")}]` : "";
+          return `- ${l.date}${tagStr}: ${l.content}`;
+        })
+        .join("\n");
+      results.push("**From lessons.md:**\n" + rendered);
+    }
+
     // Search recent daily logs (last 7 days)
     for (let i = 0; i < 7; i++) {
       const date = new Date();
@@ -163,6 +181,59 @@ export class MemoryManager {
     }
 
     return results.join("\n\n");
+  }
+
+  /**
+   * Load lessons as structured entries from lessons.md.
+   * Each entry: { date, tags, content }.
+   */
+  async loadLessons(): Promise<Lesson[]> {
+    const path = resolve(this.memoryDir, "lessons.md");
+    let raw: string;
+    try {
+      raw = await readFile(path, "utf-8");
+    } catch {
+      return [];
+    }
+    return parseLessons(raw);
+  }
+
+  /**
+   * Append a lesson to lessons.md. Creates the file if missing.
+   */
+  async appendLesson(content: string, tags: string[] = []): Promise<void> {
+    await this.ensureDir();
+    const path = resolve(this.memoryDir, "lessons.md");
+    const date = new Date().toISOString().slice(0, 10);
+    const tagStr = tags.length > 0 ? ` [${tags.join(", ")}]` : "";
+    const entry = `\n## ${date}${tagStr}\n${content.trim()}\n`;
+
+    try {
+      await stat(path);
+      await appendFile(path, entry, "utf-8");
+    } catch {
+      await writeFile(
+        path,
+        `# Lessons Learned\n\nShort, dated notes the agent writes after mistakes or non-obvious wins.\n${entry}`,
+        "utf-8"
+      );
+    }
+  }
+
+  /**
+   * Overwrite lessons.md atomically, backing up the original to lessons.md.bak.
+   * Used by the `memory prune` CLI command.
+   */
+  async writeLessons(content: string): Promise<void> {
+    await this.ensureDir();
+    const path = resolve(this.memoryDir, "lessons.md");
+    try {
+      const original = await readFile(path, "utf-8");
+      await writeFile(resolve(this.memoryDir, "lessons.md.bak"), original, "utf-8");
+    } catch {
+      // No original to back up
+    }
+    await writeFile(path, content, "utf-8");
   }
 
   /**
@@ -207,3 +278,51 @@ export class MemoryManager {
 
 // Singleton
 export const memoryManager = new MemoryManager();
+
+// ---------------------------------------------------------------------------
+// Lessons types + parser
+// ---------------------------------------------------------------------------
+
+export interface Lesson {
+  date: string;
+  tags: string[];
+  content: string;
+}
+
+/**
+ * Parse lessons.md into structured entries.
+ * Expected format per entry:
+ *   ## YYYY-MM-DD [tag1, tag2]
+ *   lesson body (one or more lines)
+ */
+function parseLessons(raw: string): Lesson[] {
+  const lessons: Lesson[] = [];
+  const lines = raw.split("\n");
+  let current: Lesson | null = null;
+
+  const headerRe = /^##\s+(\d{4}-\d{2}-\d{2})(?:\s*\[([^\]]*)\])?\s*$/;
+
+  for (const line of lines) {
+    const m = line.match(headerRe);
+    if (m) {
+      if (current) lessons.push(finalizeLesson(current));
+      current = {
+        date: m[1],
+        tags: m[2]
+          ? m[2].split(",").map((t) => t.trim()).filter(Boolean)
+          : [],
+        content: "",
+      };
+      continue;
+    }
+    if (current) {
+      current.content += (current.content ? "\n" : "") + line;
+    }
+  }
+  if (current) lessons.push(finalizeLesson(current));
+  return lessons;
+}
+
+function finalizeLesson(l: Lesson): Lesson {
+  return { ...l, content: l.content.trim() };
+}

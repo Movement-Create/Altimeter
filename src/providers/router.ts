@@ -19,6 +19,7 @@ import { AnthropicProvider } from "./anthropic.js";
 import { OpenAIProvider } from "./openai.js";
 import { GoogleProvider } from "./google.js";
 import { OllamaProvider } from "./ollama.js";
+import { MoonshotProvider } from "./moonshot.js";
 import type { EffortLevel } from "../core/types.js";
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,7 @@ const PROVIDER_FACTORIES: Record<string, ProviderFactory> = {
   openai: () => new OpenAIProvider(),
   google: () => new GoogleProvider(),
   ollama: () => new OllamaProvider(),
+  moonshot: () => new MoonshotProvider(),
 };
 
 // Model name prefixes → provider id (for auto-detection)
@@ -40,6 +42,7 @@ const MODEL_PREFIX_MAP: Array<[RegExp, string]> = [
   [/^gpt-/i, "openai"],
   [/^o1/i, "openai"],
   [/^gemini-/i, "google"],
+  [/^kimi-|^moonshot-/i, "moonshot"],
   [/^llama|mistral|codellama|phi|qwen/i, "ollama"],
 ];
 
@@ -65,6 +68,12 @@ const EFFORT_MODELS: Record<
     medium: "gemini-2.5-flash",
     high: "gemini-2.5-flash",
     max: "gemini-2.5-pro",
+  },
+  moonshot: {
+    low: "moonshot-v1-8k",
+    medium: "moonshot-v1-32k",
+    high: "kimi-k2-0905-preview",
+    max: "kimi-k2-thinking-turbo",
   },
   ollama: {
     low: "llama3.2",
@@ -133,7 +142,7 @@ export class ModelRouter {
    * Tries providers in preference order based on available API keys.
    */
   async autoSelect(effort: EffortLevel): Promise<{ provider: BaseProvider; model: string }> {
-    const preferenceOrder = ["anthropic", "openai", "google", "ollama"];
+    const preferenceOrder = ["anthropic", "openai", "google", "moonshot", "ollama"];
 
     for (const pid of preferenceOrder) {
       const provider = this.getProvider(pid);
@@ -145,7 +154,7 @@ export class ModelRouter {
     }
 
     throw new Error(
-      "No LLM provider configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY, or run a local Ollama server."
+      "No LLM provider configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, or MOONSHOT_API_KEY, or run a local Ollama server."
     );
   }
 

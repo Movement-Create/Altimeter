@@ -204,11 +204,16 @@ export class GoogleProvider extends BaseProvider {
       usageMetadata: { promptTokenCount: number; candidatesTokenCount: number };
     };
 
-    const candidate = data.candidates[0];
+    // FIX(iteration-1): Gemini may return zero candidates, or a candidate with
+    // no content.parts when finishReason is MAX_TOKENS, SAFETY, RECITATION, or
+    // OTHER. Treat any of these as an empty text response with the finishReason
+    // surfaced as stop_reason, instead of crashing on `.parts` of undefined.
+    const candidate = data.candidates?.[0];
     let text = "";
     const toolCalls = [];
 
-    for (const part of candidate.content.parts) {
+    const parts = candidate?.content?.parts ?? [];
+    for (const part of parts) {
       if (part.text) text += part.text;
       if (part.functionCall) {
         toolCalls.push(
@@ -221,10 +226,16 @@ export class GoogleProvider extends BaseProvider {
       }
     }
 
+    if (!candidate) {
+      text = "[Gemini returned no candidates]";
+    } else if (parts.length === 0 && !text) {
+      text = `[Gemini returned no content; finishReason=${candidate.finishReason ?? "unknown"}]`;
+    }
+
     return {
       text: text || null,
       tool_calls: toolCalls,
-      stop_reason: candidate.finishReason ?? "STOP",
+      stop_reason: candidate?.finishReason ?? "STOP",
       usage: {
         input_tokens: data.usageMetadata?.promptTokenCount ?? 0,
         output_tokens: data.usageMetadata?.candidatesTokenCount ?? 0,

@@ -40,19 +40,21 @@ The simplicity makes it debuggable, testable, and auditable.
 ```
 src/index.ts (CLI)
     │
-    ├── core/agent-loop.ts     ← THE LOOP
+    ├── core/reflection.ts     ← runAgentWithReflection (wraps the loop)
     │       │
-    │       ├── providers/router.ts     → provider selection
-    │       │       └── anthropic/openai/google/ollama.ts
-    │       │
-    │       ├── tools/registry.ts      → tool dispatch + permissions
-    │       │       └── bash/file-read/file-write/...
-    │       │
-    │       ├── hooks/engine.ts        → PreToolUse/PostToolUse/Stop
-    │       │
-    │       └── core/context.ts        → system prompt assembly + compression
-    │               ├── skills/loader.ts   → selective skill injection
-    │               └── memory/manager.ts  → facts.md
+    │       └── core/agent-loop.ts     ← THE LOOP
+    │               │
+    │               ├── providers/router.ts     → provider selection
+    │               │       └── anthropic/openai/google/ollama.ts
+    │               │
+    │               ├── tools/registry.ts      → tool dispatch + permissions
+    │               │       └── bash/file-read/memory-recall/memory-note/...
+    │               │
+    │               ├── hooks/engine.ts        → PreToolUse/PostToolUse/Stop
+    │               │
+    │               └── core/context.ts        → system prompt assembly + compression
+    │                       ├── skills/loader.ts   → selective skill injection
+    │                       └── memory/manager.ts  → facts.md + lessons.md (relevance-scored)
     │
     ├── core/session.ts        → JSONL session store
     │
@@ -220,15 +222,56 @@ tail -f sessions/<id>.jsonl | jq
 
 ```
 memory/
-├── facts.md        ← Curated persistent facts (manually added or LLM-extracted)
-├── index.md        ← Auto-generated index of all conversations
-├── 2024-01-15.md   ← Daily log (appended by every session)
+├── facts.md         ← Curated persistent facts (manually added or LLM-extracted)
+├── lessons.md       ← Short, dated, tag-indexed notes from past mistakes
+├── lessons.md.bak   ← Previous version of lessons.md (created by `memory prune`)
+├── index.md         ← Auto-generated index of all conversations
+├── 2024-01-15.md    ← Daily log (appended by every session)
 └── 2024-01-16.md
 ```
 
 Philosophy: Plain text is searchable, readable, git-trackable, and portable. An LLM can read and reason over 50KB of Markdown facts far better than we can engineer a retrieval system.
 
-For projects needing semantic search over large knowledge bases, an embeddings layer can be added on top of the Markdown store without changing the core architecture.
+**Memory is tool-driven, not passive.** The agent interacts with memory through two registered tools:
+
+- `memory_recall(query)` — wraps `MemoryManager.search`, returns matching snippets from `facts.md`, `lessons.md`, and recent daily logs.
+- `memory_note(content, tags?, kind?)` — wraps `MemoryManager.appendLesson` (default) or `appendFact`. The agent calls this itself; users don't have to prompt it.
+
+This was a deliberate shift from the earlier design where memory was only dumped into the system prompt at session start. The model rarely used passive memory; making it a tool call it could explicitly invoke is what moved usage from "never" to "naturally integrated."
+
+### Lessons with relevance scoring
+
+`lessons.md` entries follow a strict format so [src/core/context.ts](src/core/context.ts) can parse them into `Lesson[]`:
+
+```
+## YYYY-MM-DD [tag1, tag2]
+lesson body
+```
+
+On every turn, `getRelevantLessons(prompt)` scores each lesson:
+- Tag substring match in the user prompt → weight 3 per tag
+- Content word overlap with prompt words → weight 1 (capped at 1 per lesson)
+
+The top 5 lessons with score > 0 are injected into the system prompt under `# Lessons (relevant to this turn)`, positioned between skills and facts. If nothing scores, the section is omitted — lessons are free when irrelevant.
+
+### Triggered reflection
+
+[src/core/reflection.ts](src/core/reflection.ts) exports `runAgentWithReflection` — the CLI uses this instead of `runAgent` directly. It:
+
+1. Runs the agent normally.
+2. Inspects the result: if `stop_reason === "text"` AND (`turns >= 5` OR any tool result had `is_error: true`), it fires exactly one additional `runAgent` call with this prompt:
+
+   > *"Before finishing: is there anything future-you should remember from this task? If you made a mistake, hit an unexpected error, or learned a non-obvious gotcha, call memory_note with kind='lesson' and short relevant tags. If nothing is worth saving, reply with just 'done'."*
+
+3. Returns the original result's user-facing text, but with the extended history and combined usage/cost.
+
+This is the entire "learning" mechanism. No background loops, no continuous reflection, no self-modification. One extra turn, triggered conditionally. The agent-loop stays pure — reflection is a wrapper, not a loop change.
+
+### Pruning
+
+`altimeter memory prune` is a maintenance command (not a tool). It reads `lessons.md`, asks the LLM in a single auto-mode turn to dedupe / merge / drop stale entries, and writes the cleaned version back — with `lessons.md.bak` as a rollback. Built day-one because lesson sprawl is the predictable failure mode.
+
+For projects needing semantic search over large knowledge bases, an embeddings layer can be added on top of the Markdown store without changing the memory interface.
 
 ## Skill System
 

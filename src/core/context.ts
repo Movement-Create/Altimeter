@@ -22,7 +22,9 @@ import { readFile, stat } from "fs/promises";
 import { resolve, join } from "path";
 import type { AgentRunOptions, Message, ToolResultContent } from "./types.js";
 import { skillLoader } from "../skills/loader.js";
-import { memoryManager } from "../memory/manager.js";
+import { memoryManager, type Lesson } from "../memory/manager.js";
+
+const MAX_LESSONS_INJECTED = 5;
 
 // Approximate token counts (rough: 1 token ≈ 4 chars)
 const CHARS_PER_TOKEN = 4;
@@ -97,7 +99,22 @@ export async function assembleContext(
     parts.push("---\n# Available Skills\n" + skillContent);
   }
 
-  // 4. Memory facts
+  // 4. Relevant lessons (scored against the current user prompt)
+  const relevantLessons = await getRelevantLessons(options.prompt);
+  if (relevantLessons.length > 0) {
+    const rendered = relevantLessons
+      .map((l) => {
+        const tagStr = l.tags.length > 0 ? ` [${l.tags.join(", ")}]` : "";
+        return `- ${l.date}${tagStr}: ${l.content}`;
+      })
+      .join("\n");
+    parts.push(
+      "---\n# Lessons (relevant to this turn)\nCheck these before acting — they are notes you wrote after prior mistakes or non-obvious wins.\n" +
+        rendered
+    );
+  }
+
+  // 5. Memory facts
   const facts = await memoryManager.loadFacts();
   if (facts) {
     parts.push("---\n# Memory (Persistent Facts)\n" + facts);
@@ -122,6 +139,56 @@ Rules:
 - If a tool call fails, analyze the error and try a different approach
 - When done, provide a clear summary of what was accomplished
 `;
+
+// ---------------------------------------------------------------------------
+// Lesson relevance scoring
+// ---------------------------------------------------------------------------
+
+/**
+ * Score each lesson against the current user prompt and return the top matches.
+ * Scoring signals:
+ *  - tag substring match in the prompt (weight 3)
+ *  - lesson content word overlap with the prompt (weight 1)
+ * Only lessons with score > 0 are returned. Capped at MAX_LESSONS_INJECTED.
+ */
+async function getRelevantLessons(prompt: string): Promise<Lesson[]> {
+  const all = await memoryManager.loadLessons();
+  if (all.length === 0) return [];
+
+  const lowerPrompt = prompt.toLowerCase();
+  const promptWords = new Set(
+    lowerPrompt
+      .split(/[^a-z0-9_./-]+/i)
+      .filter((w) => w.length >= 3)
+  );
+
+  const scored = all.map((lesson) => {
+    let score = 0;
+
+    for (const tag of lesson.tags) {
+      if (lowerPrompt.includes(tag.toLowerCase())) score += 3;
+    }
+
+    const contentWords = lesson.content
+      .toLowerCase()
+      .split(/[^a-z0-9_./-]+/i)
+      .filter((w) => w.length >= 3);
+    for (const w of contentWords) {
+      if (promptWords.has(w)) {
+        score += 1;
+        break; // one hit per lesson is enough signal
+      }
+    }
+
+    return { lesson, score };
+  });
+
+  return scored
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_LESSONS_INJECTED)
+    .map((s) => s.lesson);
+}
 
 // ---------------------------------------------------------------------------
 // Load ALTIMETER.md from cwd (survives context compaction)

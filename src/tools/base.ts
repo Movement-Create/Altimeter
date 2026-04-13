@@ -47,6 +47,12 @@ export interface ToolExecutionContext {
   env: Record<string, string>;
   /** Whether we're in plan (dry-run) mode */
   plan_mode: boolean;
+  /**
+   * FIX(iteration-1): Sub-agent recursion depth. 0 = top-level agent.
+   * Incremented by the `agent` tool when spawning a child. The agent tool
+   * refuses to spawn beyond MAX_SUBAGENT_DEPTH to prevent unbounded recursion.
+   */
+  subagent_depth?: number;
 }
 
 // ---------------------------------------------------------------------------
