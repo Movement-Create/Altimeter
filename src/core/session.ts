@@ -35,7 +35,7 @@ export class SessionManager {
     config: AltimeterConfig,
     overrides: Partial<SessionConfig> = {}
   ): Promise<SessionConfig> {
-    const id = randomUUID();
+    const id = overrides.id ?? randomUUID();
     const timestamp = new Date().toISOString();
 
     await mkdir(resolve(this.sessionsDir), { recursive: true });
@@ -82,6 +82,17 @@ export class SessionManager {
   async logUserMessage(session: SessionConfig, content: string): Promise<void> {
     await this.appendEvent(session, {
       type: "user_message",
+      timestamp: new Date().toISOString(),
+      data: { content },
+    });
+  }
+
+  /**
+   * Log an assistant message to the session.
+   */
+  async logAssistantMessage(session: SessionConfig, content: string): Promise<void> {
+    await this.appendEvent(session, {
+      type: "assistant_message",
       timestamp: new Date().toISOString(),
       data: { content },
     });

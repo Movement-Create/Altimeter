@@ -146,7 +146,8 @@
             "anthropic",
             "openai",
             "google",
-            "ollama"
+            "ollama",
+            "moonshot"
           ],
           "description": "Default AI provider"
         },
@@ -187,6 +188,18 @@
           "default": "",
           "description": "OpenAI API key for GPT models",
           "markdownDescription": "OpenAI API key. Get yours at [platform.openai.com](https://platform.openai.com)"
+        },
+        "altimeter.moonshotApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "Moonshot API key for Kimi models",
+          "markdownDescription": "Moonshot API key for Kimi models. Get yours at [platform.moonshot.ai](https://platform.moonshot.ai)"
+        },
+        "altimeter.braveSearchKey": {
+          "type": "string",
+          "default": "",
+          "description": "Brave Search API key for web_search tool",
+          "markdownDescription": "Brave Search API key (free 2k/month). Get yours at [brave.com/search/api](https://brave.com/search/api/)"
         },
         "altimeter.altimeterPath": {
           "type": "string",

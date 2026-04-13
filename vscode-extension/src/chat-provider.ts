@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { randomUUID } from 'crypto';
 import { AgentRunner, RunnerConfig } from './agent-runner';
 import { AltimeterStatusBar } from './status-bar';
 
@@ -13,6 +14,7 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
   private _extensionUri: vscode.Uri;
   private _isRunning = false;
   private _streamingMessageStarted = false;
+  private _sessionId: string = randomUUID();
 
   constructor(
     extensionUri: vscode.Uri,
@@ -54,6 +56,9 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
           break;
         case 'configChange':
           this._handleConfigChange(message);
+          break;
+        case 'clearSession':
+          this._sessionId = randomUUID();
           break;
         case 'requestFiles':
           await this._handleRequestFiles(message.query);
@@ -108,6 +113,7 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
     try {
       const result = await this._runner.run({
         prompt: expandedPrompt,
+        sessionId: this._sessionId,
         onStdout: (chunk) => {
           this._parseAndForwardChunk(chunk);
         },
@@ -180,6 +186,8 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
         config.provider = 'anthropic';
       } else if (message.model.startsWith('gpt')) {
         config.provider = 'openai';
+      } else if (message.model.startsWith('kimi') || message.model.startsWith('moonshot')) {
+        config.provider = 'moonshot';
       }
       config.model = message.model;
     }
@@ -410,6 +418,9 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
             <option value="claude-3-5-haiku-20241022">claude-3.5-haiku</option>
             <option value="gpt-4o">gpt-4o</option>
             <option value="gpt-4o-mini">gpt-4o-mini</option>
+            <option value="kimi-k2-0905-preview">kimi-k2</option>
+            <option value="kimi-k2-thinking-turbo">kimi-k2-thinking</option>
+            <option value="moonshot-v1-32k">moonshot-v1-32k</option>
           </select>
         </div>
         <div class="select-wrap">

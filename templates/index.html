@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>4D Tesseract Visualization</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto:wght@300&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Roboto', sans-serif;
+            background: radial-gradient(ellipse at center, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            color: #fff;
+            overflow: hidden;
+        }
+
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+
+        .header {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            text-align: center;
+            z-index: 100;
+            pointer-events: none;
+        }
+
+        h1 {
+            font-family: 'Orbitron', monospace;
+            font-size: 3em;
+            font-weight: 700;
+            text-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
+            margin-bottom: 10px;
+            background: linear-gradient(45deg, #00ffff, #ff00ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            font-size: 1.2em;
+            color: #a0a0a0;
+            text-shadow: 0 0 10px rgba(160, 160, 160, 0.5);
+        }
+
+        .controls {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 20px;
+            border-radius: 10px;
+            border: 1px solid rgba(0, 255, 255, 0.3);
+            z-index: 100;
+        }
+
+        .control-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 0.9em;
+            color: #00ffff;
+        }
+
+        input[type="range"] {
+            width: 200px;
+            height: 5px;
+            background: #333;
+            outline: none;
+            border-radius: 5px;
+            -webkit-appearance: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 15px;
+            height: 15px;
+            background: #00ffff;
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+        }
+
+        .auto-rotate-btn {
+            background: linear-gradient(45deg, #00ffff, #ff00ff);
+            border: none;
+            color: #000;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            margin-top: 10px;
+            transition: all 0.3s ease;
+        }
+
+        .auto-rotate-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 20px rgba(255, 0, 255, 0.5);
+        }
+
+        .info-panel {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 20px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 0, 255, 0.3);
+            max-width: 300px;
+            z-index: 100;
+        }
+
+        .info-panel h3 {
+            color: #ff00ff;
+            margin-bottom: 10px;
+            font-family: 'Orbitron', monospace;
+        }
+
+        .info-panel p {
+            font-size: 0.9em;
+            line-height: 1.5;
+            color: #ccc;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container">
+        <div class="header">
+            <h1>4D TESSERACT</h1>
+            <div class="subtitle">Visualizing the Fourth Dimension</div>
+        </div>
+
+        <div class="controls">
+            <div class="control-group">
+                <label for="angleXW">X-W Rotation</label>
+                <input type="range" id="angleXW" min="0" max="6.28" step="0.01" value="0">
+            </div>
+            <div class="control-group">
+                <label for="angleYW">Y-W Rotation</label>
+                <input type="range" id="angleYW" min="0" max="6.28" step="0.01" value="0">
+            </div>
+            <div class="control-group">
+                <label for="angleZW">Z-W Rotation</label>
+                <input type="range" id="angleZW" min="0" max="6.28" step="0.01" value="0">
+            </div>
+            <button id="autoRotate" class="auto-rotate-btn">Auto Rotate</button>
+        </div>
+
+        <div class="info-panel">
+            <h3>About the Tesseract</h3>
+            <p>A tesseract is the 4D analog of a cube. Just as a cube consists of 6 square faces, a tesseract consists of 8 cubical cells.</p>
+            <p>Drag to rotate in 3D, use sliders to rotate in 4D dimensions (X-W, Y-W, Z-W).</p>
+            <p>Enable auto-rotation for a beautiful continuous animation!</p>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/tesseract.js') }}"></script>
+</body>
+</html>

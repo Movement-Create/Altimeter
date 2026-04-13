@@ -93,6 +93,7 @@ program
   .option("--auto", "Auto-approve tool permissions")
   .option("--json", "Output result as JSON")
   .option("--system <prompt>", "System prompt override")
+  .option("--session <id>", "Resume (or create) a session with this id for cross-invocation continuity")
   .action(async (prompt: string, opts) => {
     const config = await loadConfig();
 
@@ -103,7 +104,20 @@ program
     if (opts.maxBudget) config.max_budget_usd = parseFloat(opts.maxBudget);
     if (opts.auto) config.permission_mode = "auto";
 
-    const session = await sessionManager.createSession(config);
+    let session;
+    let history: import("./core/types.js").Message[] = [];
+    if (opts.session) {
+      const resumed = await sessionManager.resumeSession(opts.session);
+      if (resumed) {
+        session = resumed.session;
+        history = resumed.messages;
+      } else {
+        session = await sessionManager.createSession(config, { id: opts.session });
+      }
+    } else {
+      session = await sessionManager.createSession(config);
+    }
+    await sessionManager.logUserMessage(session, prompt);
 
     if (!opts.json) {
       process.stderr.write(chalk.dim(`Session: ${session.id}\n`));
@@ -121,6 +135,7 @@ program
       const result = await runAgentWithReflection({
         prompt,
         session,
+        history,
         system_prompt: opts.system,
         onText: opts.json ? undefined : (chunk) => {
           process.stdout.write(chunk);
@@ -144,6 +159,8 @@ program
               }
             },
       });
+
+      await sessionManager.logAssistantMessage(session, result.text);
 
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));

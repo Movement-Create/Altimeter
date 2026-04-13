@@ -25,6 +25,7 @@ export interface AgentRunOptions {
   onStderr?: (data: string) => void;
   onChunk?: (text: string) => void;
   allowedTools?: string[];
+  sessionId?: string;
 }
 
 export interface RunnerConfig {
@@ -38,6 +39,7 @@ export class AgentRunner {
   private outputChannel: vscode.OutputChannel;
   private currentProcess: ChildProcess | null = null;
   private _config: RunnerConfig = {};
+  private _bravePrompted = false;
 
   constructor(outputChannel: vscode.OutputChannel) {
     this.outputChannel = outputChannel;
@@ -62,6 +64,8 @@ export class AgentRunner {
       googleApiKey: config.get<string>('googleApiKey', ''),
       anthropicApiKey: config.get<string>('anthropicApiKey', ''),
       openaiApiKey: config.get<string>('openaiApiKey', ''),
+      moonshotApiKey: config.get<string>('moonshotApiKey', ''),
+      braveSearchKey: config.get<string>('braveSearchKey', ''),
       altimeterPath: config.get<string>('altimeterPath', ''),
     };
   }
@@ -137,8 +141,71 @@ export class AgentRunner {
     if (config.openaiApiKey) {
       env['OPENAI_API_KEY'] = config.openaiApiKey;
     }
+    if (config.moonshotApiKey) {
+      env['MOONSHOT_API_KEY'] = config.moonshotApiKey;
+    }
+    if (config.braveSearchKey) {
+      env['BRAVE_API_KEY'] = config.braveSearchKey;
+    }
 
     return env;
+  }
+
+  /**
+   * Map a provider id to the settings key, env var, and human label for its API key.
+   */
+  private static PROVIDER_KEY_MAP: Record<string, { setting: string; env: string; label: string; url: string }> = {
+    google:    { setting: 'googleApiKey',    env: 'GOOGLE_API_KEY',    label: 'Google Gemini',    url: 'https://aistudio.google.com' },
+    anthropic: { setting: 'anthropicApiKey', env: 'ANTHROPIC_API_KEY', label: 'Anthropic Claude', url: 'https://console.anthropic.com' },
+    openai:    { setting: 'openaiApiKey',    env: 'OPENAI_API_KEY',    label: 'OpenAI',           url: 'https://platform.openai.com' },
+    moonshot:  { setting: 'moonshotApiKey',  env: 'MOONSHOT_API_KEY',  label: 'Moonshot (Kimi)',  url: 'https://platform.moonshot.ai' },
+  };
+
+  /**
+   * Ensure the model provider key and Brave Search key are configured.
+   * Prompts the user for any missing keys and persists them to global settings.
+   * Returns false if the user cancelled a required prompt.
+   */
+  private async ensureApiKeys(provider: string): Promise<boolean> {
+    const cfg = vscode.workspace.getConfiguration('altimeter');
+
+    // Provider key (required)
+    const info = AgentRunner.PROVIDER_KEY_MAP[provider];
+    if (info) {
+      const existing = cfg.get<string>(info.setting, '') || process.env[info.env] || '';
+      if (!existing) {
+        const entered = await vscode.window.showInputBox({
+          title: `${info.label} API key required`,
+          prompt: `Enter your ${info.label} API key (get one at ${info.url})`,
+          password: true,
+          ignoreFocusOut: true,
+          placeHolder: info.env,
+        });
+        if (!entered) {
+          vscode.window.showWarningMessage(`Altimeter: ${info.label} API key is required to run.`);
+          return false;
+        }
+        await cfg.update(info.setting, entered.trim(), vscode.ConfigurationTarget.Global);
+      }
+    }
+
+    // Brave Search key (optional, prompted once per session)
+    const braveExisting = cfg.get<string>('braveSearchKey', '') || process.env.BRAVE_API_KEY || '';
+    if (!braveExisting && !this._bravePrompted) {
+      this._bravePrompted = true;
+      const entered = await vscode.window.showInputBox({
+        title: 'Brave Search API key (optional)',
+        prompt: 'Enter your Brave Search API key for web search (free 2k/mo at brave.com/search/api). Leave blank to skip.',
+        password: true,
+        ignoreFocusOut: true,
+        placeHolder: 'BRAVE_API_KEY (optional — press Enter to skip)',
+      });
+      if (entered && entered.trim()) {
+        await cfg.update('braveSearchKey', entered.trim(), vscode.ConfigurationTarget.Global);
+      }
+    }
+
+    return true;
   }
 
   private getPermissionRules(): Record<string, string> {
@@ -184,6 +251,11 @@ export class AgentRunner {
     // Merge runner config overrides with options and settings
     const provider = options.provider || this._config.provider || config.provider;
     const model = options.model || this._config.model || config.model;
+
+    const keysOk = await this.ensureApiKeys(provider);
+    if (!keysOk) {
+      throw new Error(`Missing API key for provider "${provider}". Set it in Altimeter settings and try again.`);
+    }
     const maxTurns = options.maxTurns || config.maxTurns;
     const mode = options.mode || this._config.mode || 'auto';
     const auto = options.auto !== undefined ? options.auto : config.autoApprove;
@@ -214,6 +286,10 @@ export class AgentRunner {
 
     if (options.maxBudget !== undefined) {
       args.push('--max-budget', String(options.maxBudget));
+    }
+
+    if (options.sessionId) {
+      args.push('--session', options.sessionId);
     }
 
     const env = this.buildEnv(provider);

@@ -139,6 +139,7 @@
     chatHistory = [];
     saveState();
     showEmptyState();
+    vscode.postMessage({ type: 'clearSession' });
   }
 
   // ── Toolbar config ──────────────────────────────────────────────
