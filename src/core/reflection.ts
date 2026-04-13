@@ -16,6 +16,7 @@ import type {
   ToolResultContent,
 } from "./types.js";
 import { runAgent } from "./agent-loop.js";
+import { tracer } from "../observability/tracer.js";
 
 const LONG_TASK_TURN_THRESHOLD = 5;
 
@@ -43,13 +44,40 @@ export async function runAgentWithReflection(
   }
   if (!willReflect) return result;
 
-  // One bounded reflection turn. Budget-limited by the session itself.
-  const reflectionResult = await runAgent({
-    ...options,
-    prompt: REFLECTION_PROMPT,
-    history: result.messages,
-    // Reflection is noisy for the primary output stream — swallow it.
-    onText: undefined,
+  const triggerReason =
+    result.turns >= LONG_TASK_TURN_THRESHOLD ? "turns>=5" : "tool_error";
+
+  // Reflection span — a fresh root in its own trace. The child runAgent's
+  // agent.session joins this trace via _parent_trace_id/_parent_span_id.
+  const { active: reflSpan, run: runInReflectionTrace } = tracer.startRootSpan(
+    "agent.reflection",
+    options.session,
+    { trigger_reason: triggerReason, original_turns: result.turns }
+  );
+
+  const reflectionResult = await runInReflectionTrace(async () => {
+    const parent = tracer.currentContext();
+    try {
+      const r = await runAgent({
+        ...options,
+        prompt: REFLECTION_PROMPT,
+        history: result.messages,
+        // Reflection is noisy for the primary output stream — swallow it.
+        onText: undefined,
+        _parent_trace_id: parent?.trace_id,
+        _parent_span_id: parent?.span_id,
+      });
+      reflSpan?.setAttributes({
+        reflection_turns: r.turns,
+        reflection_cost_usd: r.cost_usd,
+      });
+      tracer.end(reflSpan);
+      return r;
+    } catch (e) {
+      reflSpan?.recordError(e);
+      tracer.end(reflSpan);
+      throw e;
+    }
   });
 
   // Return the original result's text, but the extended history + combined usage.

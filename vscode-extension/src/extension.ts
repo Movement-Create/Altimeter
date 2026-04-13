@@ -3,6 +3,8 @@ import { AgentRunner } from './agent-runner';
 import { AltimeterChatProvider } from './chat-provider';
 import { AltimeterStatusBar } from './status-bar';
 import { registerCommands } from './commands';
+import { SessionsProvider } from './sessions-provider';
+import { SessionPanelManager } from './session-panel-manager';
 
 export function activate(context: vscode.ExtensionContext) {
   // Create output channel
@@ -36,8 +38,34 @@ export function activate(context: vscode.ExtensionContext) {
     )
   );
 
+  // Sessions tree view
+  const sessionsProvider = new SessionsProvider(runner);
+  chatProvider.setSessionsProvider(sessionsProvider);
+  context.subscriptions.push(
+    vscode.window.registerTreeDataProvider(
+      SessionsProvider.viewType,
+      sessionsProvider
+    )
+  );
+
+  // Session panel manager (tab-based sessions)
+  const sessionPanelManager = new SessionPanelManager(
+    context.extensionUri,
+    runner,
+    statusBar,
+    sessionsProvider
+  );
+
   // Register all commands
-  registerCommands(context, runner, chatProvider, statusBar, outputChannel);
+  registerCommands(
+    context,
+    runner,
+    chatProvider,
+    statusBar,
+    outputChannel,
+    sessionsProvider,
+    sessionPanelManager
+  );
 
   // First-run API key check
   const altConfig = vscode.workspace.getConfiguration('altimeter');

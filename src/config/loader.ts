@@ -125,6 +125,15 @@ function loadFromEnv(): Record<string, unknown> {
   if (process.env.ALTIMETER_SYSTEM_PROMPT)
     config.system_prompt = process.env.ALTIMETER_SYSTEM_PROMPT;
 
+  // Observability
+  const obs: Record<string, unknown> = {};
+  if (process.env.ALTIMETER_OBS_LEVEL) obs.level = process.env.ALTIMETER_OBS_LEVEL;
+  if (process.env.ALTIMETER_OBS_NARRATE)
+    obs.narrate = process.env.ALTIMETER_OBS_NARRATE === "1" || process.env.ALTIMETER_OBS_NARRATE === "true";
+  if (process.env.ALTIMETER_OTEL_ENDPOINT)
+    obs.otel_endpoint = process.env.ALTIMETER_OTEL_ENDPOINT;
+  if (Object.keys(obs).length > 0) config.observability = obs;
+
   return config;
 }
 

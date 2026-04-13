@@ -34,6 +34,9 @@ import { cronScheduler } from "./scheduler/cron.js";
 import { webhookServer } from "./scheduler/webhook.js";
 import { createInteractivePermissionCallback } from "./security/permissions.js";
 import type { AltimeterConfig, Message } from "./core/types.js";
+import { tracer } from "./observability/tracer.js";
+import { LivePrinter } from "./observability/printer.js";
+import { summarize } from "./observability/summarize.js";
 
 const VERSION = "0.1.0";
 
@@ -91,9 +94,13 @@ program
   .option("--max-turns <n>", "Max turns", "20")
   .option("--max-budget <usd>", "Max USD budget", "1.0")
   .option("--auto", "Auto-approve tool permissions")
+  .option("--plan", "Plan mode: describe tools without executing")
+  .option("--allowed-tools <list>", "Comma-separated list of tools allowed without prompting")
   .option("--json", "Output result as JSON")
   .option("--system <prompt>", "System prompt override")
   .option("--session <id>", "Resume (or create) a session with this id for cross-invocation continuity")
+  .option("--summary", "Print the end-of-session summary to stdout")
+  .option("--no-trace", "Disable observability spans (detail tier)")
   .action(async (prompt: string, opts) => {
     const config = await loadConfig();
 
@@ -103,6 +110,16 @@ program
     if (opts.maxTurns) config.max_turns = parseInt(opts.maxTurns, 10);
     if (opts.maxBudget) config.max_budget_usd = parseFloat(opts.maxBudget);
     if (opts.auto) config.permission_mode = "auto";
+    if (opts.plan) config.permission_mode = "plan";
+
+    // Observability: configure tracer + live printer from config + flags
+    const obsLevel = opts.trace === false ? "off" : config.observability.level;
+    tracer.setLevel(obsLevel);
+    const livePrinter =
+      !opts.json && obsLevel !== "off"
+        ? new LivePrinter(obsLevel === "full" ? "full" : "summary")
+        : null;
+    livePrinter?.attach();
 
     let session;
     let history: import("./core/types.js").Message[] = [];
@@ -141,29 +158,27 @@ program
           process.stdout.write(chunk);
           textWasStreamed = true;
         },
-        onToolCall: opts.json
-          ? undefined
-          : (call) => {
-              process.stderr.write(chalk.cyan(`\n[Tool] ${call.name}\n`));
-              const inputStr = JSON.stringify(call.input, null, 2);
-              if (inputStr.length < 200) process.stderr.write(chalk.dim(inputStr) + '\n');
-            },
-        onToolResult: opts.json
-          ? undefined
-          : (result) => {
-              if (result.is_error) {
-                process.stderr.write(chalk.red(`[Error] ${result.content.slice(0, 100)}\n`));
-              } else {
-                const preview = result.content.length > 200 ? result.content.slice(0, 200) + '...' : result.content;
-                process.stderr.write(chalk.dim(`[ToolDone] ${preview}\n`));
-              }
-            },
       });
 
       await sessionManager.logAssistantMessage(session, result.text);
 
+      // Story-tier: deterministic summary from the span stream.
+      let summaryPath: string | null = null;
+      let summaryMarkdown: string | null = null;
+      if (obsLevel !== "off") {
+        try {
+          const s = await summarize(session.id, config.sessions_dir);
+          summaryPath = s.path;
+          summaryMarkdown = s.markdown;
+        } catch (e) {
+          process.stderr.write(
+            chalk.yellow(`[summary] failed: ${String(e).slice(0, 200)}\n`)
+          );
+        }
+      }
+
       if (opts.json) {
-        console.log(JSON.stringify(result, null, 2));
+        console.log(JSON.stringify({ ...result, summary_path: summaryPath }, null, 2));
       } else {
         if (textWasStreamed) {
           console.log(); // newline after streamed text
@@ -171,10 +186,18 @@ program
           console.log(result.text);
         }
         printStats(result.turns, result.usage, result.cost_usd);
+        if (summaryPath) {
+          process.stderr.write(chalk.dim(`[summary] ${summaryPath}\n`));
+          if (opts.summary && summaryMarkdown) {
+            process.stdout.write("\n" + summaryMarkdown);
+          }
+        }
       }
 
+      livePrinter?.detach();
       process.exit(result.stop_reason === "error" ? 1 : 0);
     } catch (e) {
+      livePrinter?.detach();
       console.error(chalk.red("Error:"), e);
       process.exit(1);
     }
@@ -415,6 +438,15 @@ async function runChatSession(
 
   printBanner(config, session.id);
 
+  // Observability: one LivePrinter for the whole chat session
+  const obsLevel = config.observability.level;
+  tracer.setLevel(obsLevel);
+  const chatPrinter =
+    obsLevel !== "off"
+      ? new LivePrinter(obsLevel === "full" ? "full" : "summary")
+      : null;
+  chatPrinter?.attach();
+
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -445,14 +477,6 @@ async function runChatSession(
         session,
         history,
         onText: (chunk) => process.stdout.write(chalk.white(chunk)),
-        onToolCall: (call) => {
-          console.log(chalk.cyan(`\n⚙ ${call.name}`));
-        },
-        onToolResult: (result) => {
-          if (result.is_error) {
-            console.log(chalk.red(`✗ ${result.content.slice(0, 100)}`));
-          }
-        },
       });
 
       console.log("\n");
@@ -466,6 +490,16 @@ async function runChatSession(
   }
 
   rl.close();
+  chatPrinter?.detach();
+  // Emit a story-tier summary for the chat session too.
+  if (obsLevel !== "off") {
+    try {
+      const s = await summarize(session.id, config.sessions_dir);
+      process.stderr.write(chalk.dim(`[summary] ${s.path}\n`));
+    } catch {
+      // silent
+    }
+  }
   console.log(chalk.dim("\nSession ended."));
 }
 

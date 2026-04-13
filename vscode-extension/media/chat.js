@@ -27,6 +27,17 @@
   let fileList = [];
   let currentTurnId = 0;
   let chatHistory = []; // { role, content } entries for state persistence
+  let lastPrompt = '';
+  let pendingThinking = null; // { text, startedAt }
+
+  const SLASH_COMMANDS = [
+    { cmd: '/file', desc: 'Insert a file reference' },
+    { cmd: '/model', desc: 'Switch the active model' },
+    { cmd: '/clear', desc: 'Clear the current session' },
+    { cmd: '/new', desc: 'Start a new session' },
+    { cmd: '/help', desc: 'Show available commands' },
+  ];
+  let paletteMode = null; // 'commands' | 'files' | null
 
   // ── State ──────────────────────────────────────────────────────
 
@@ -120,6 +131,7 @@
 
     // Add user message to UI
     appendMessage('user', text);
+    lastPrompt = text;
 
     // Send to extension
     vscode.postMessage({ type: 'sendMessage', text });
@@ -163,25 +175,120 @@
     const value = messageInput.value;
     const cursorPos = messageInput.selectionStart;
 
-    // Find the last / before cursor that starts a file reference
     const beforeCursor = value.slice(0, cursorPos);
     const lastSlash = beforeCursor.lastIndexOf('/');
 
     if (lastSlash >= 0) {
-      // Only trigger if / is at start or preceded by a space (not mid-path)
       const charBefore = lastSlash > 0 ? beforeCursor[lastSlash - 1] : ' ';
       if (charBefore === ' ' || lastSlash === 0) {
         const textAfterSlash = beforeCursor.slice(lastSlash + 1);
-        // Only trigger if no spaces in the text after / (it's a path)
-        if (!textAfterSlash.includes(' ') && textAfterSlash !== 'selection') {
-          slashStartPos = lastSlash;
-          vscode.postMessage({ type: 'requestFiles', query: textAfterSlash });
+        if (textAfterSlash.includes(' ') || textAfterSlash === 'selection') {
+          hideAutocomplete();
           return;
         }
+        slashStartPos = lastSlash;
+
+        // If the text after / looks like a path (contains /, .) or starts with a file-command prefix,
+        // show file picker. Otherwise show command palette.
+        const looksLikePath = textAfterSlash.includes('/') || textAfterSlash.includes('.');
+        const matchesCommand = SLASH_COMMANDS.some((c) =>
+          c.cmd.slice(1).startsWith(textAfterSlash)
+        );
+
+        if (!looksLikePath && (textAfterSlash === '' || matchesCommand)) {
+          showCommandPalette(textAfterSlash);
+          return;
+        }
+
+        paletteMode = 'files';
+        vscode.postMessage({ type: 'requestFiles', query: textAfterSlash });
+        return;
       }
     }
 
     hideAutocomplete();
+  }
+
+  function showCommandPalette(query) {
+    if (!fileAutocomplete) return;
+    const filtered = SLASH_COMMANDS.filter((c) =>
+      c.cmd.slice(1).toLowerCase().startsWith(query.toLowerCase())
+    );
+    if (filtered.length === 0) {
+      hideAutocomplete();
+      return;
+    }
+
+    paletteMode = 'commands';
+    fileAutocomplete.innerHTML = '';
+    fileAutocomplete.setAttribute('role', 'listbox');
+    autocompleteIndex = 0;
+    autocompleteActive = true;
+
+    filtered.forEach((c, idx) => {
+      const item = document.createElement('div');
+      item.classList.add('autocomplete-item');
+      item.setAttribute('role', 'option');
+      item.id = 'autocomplete-opt-' + idx;
+      item.dataset.command = c.cmd;
+      if (idx === 0) {
+        item.classList.add('active');
+        item.setAttribute('aria-selected', 'true');
+      }
+      const cmdSpan = document.createElement('span');
+      cmdSpan.style.fontWeight = '600';
+      cmdSpan.textContent = c.cmd;
+      const descSpan = document.createElement('span');
+      descSpan.style.opacity = '0.6';
+      descSpan.style.marginLeft = '8px';
+      descSpan.textContent = c.desc;
+      item.appendChild(cmdSpan);
+      item.appendChild(descSpan);
+      item.addEventListener('click', () => runSlashCommand(c.cmd));
+      fileAutocomplete.appendChild(item);
+    });
+
+    messageInput.setAttribute('aria-expanded', 'true');
+    fileAutocomplete.classList.remove('hidden');
+  }
+
+  function runSlashCommand(cmd) {
+    const value = messageInput.value;
+    const before = value.slice(0, slashStartPos);
+    const after = value.slice(messageInput.selectionStart);
+    messageInput.value = (before + after).replace(/^\s+/, '');
+    hideAutocomplete();
+
+    switch (cmd) {
+      case '/file':
+        messageInput.value = before + '/' + after;
+        messageInput.selectionStart = messageInput.selectionEnd = before.length + 1;
+        paletteMode = 'files';
+        slashStartPos = before.length;
+        vscode.postMessage({ type: 'requestFiles', query: '' });
+        messageInput.focus();
+        break;
+      case '/model':
+        vscode.postMessage({ type: 'pickModel' });
+        messageInput.focus();
+        break;
+      case '/clear':
+        clearChat();
+        break;
+      case '/new':
+        vscode.postMessage({ type: 'newSession' });
+        break;
+      case '/help':
+        appendLocalHelpMessage();
+        messageInput.focus();
+        break;
+    }
+  }
+
+  function appendLocalHelpMessage() {
+    const lines = SLASH_COMMANDS.map((c) => `- \`${c.cmd}\` — ${c.desc}`).join('\n');
+    const content = `**Available slash commands:**\n\n${lines}`;
+    appendMessage('assistant', content);
   }
 
   function handleAutocompleteNav(e) {
@@ -202,7 +309,11 @@
       e.preventDefault();
       const selected = items[autocompleteIndex];
       if (selected) {
-        insertFileRef(selected.dataset.path);
+        if (selected.dataset.command) {
+          runSlashCommand(selected.dataset.command);
+        } else if (selected.dataset.path) {
+          insertFileRef(selected.dataset.path);
+        }
       }
     } else if (e.key === 'Escape') {
       hideAutocomplete();
@@ -272,6 +383,7 @@
     messageInput.removeAttribute('aria-controls');
     autocompleteActive = false;
     slashStartPos = -1;
+    paletteMode = null;
   }
 
   function updateAutocompleteHighlight(items) {
@@ -325,6 +437,7 @@
     if (contentEl) {
       contentEl.innerHTML = renderMarkdown(streamingContent);
       attachCopyButtons(contentEl);
+      rewriteFileLinks(contentEl);
     }
     scrollToBottom();
   }
@@ -337,6 +450,11 @@
       if (contentEl && streamingContent) {
         contentEl.innerHTML = renderMarkdown(streamingContent);
         attachCopyButtons(contentEl);
+        rewriteFileLinks(contentEl);
+      }
+      if (pendingThinking) {
+        prependThinkingBlock(streamingBubble, pendingThinking);
+        pendingThinking = null;
       }
       // Save streamed message to history
       if (streamingContent) {
@@ -364,11 +482,26 @@
     const contentEl = document.createElement('div');
     contentEl.classList.add('message-content');
 
-    if (role === 'user' || role === 'error') {
+    if (role === 'user') {
       contentEl.textContent = content;
+    } else if (role === 'error') {
+      contentEl.textContent = content;
+      const retryBtn = document.createElement('button');
+      retryBtn.className = 'retry-btn';
+      retryBtn.textContent = 'Retry';
+      retryBtn.addEventListener('click', () => {
+        if (lastPrompt && !isLoading) {
+          wrapper.remove();
+          appendMessage('user', lastPrompt);
+          vscode.postMessage({ type: 'sendMessage', text: lastPrompt });
+        }
+      });
+      contentEl.appendChild(document.createElement('br'));
+      contentEl.appendChild(retryBtn);
     } else {
       contentEl.innerHTML = renderMarkdown(content);
       attachCopyButtons(contentEl);
+      rewriteFileLinks(contentEl);
     }
 
     wrapper.appendChild(meta);
@@ -822,6 +955,66 @@
     return String(n);
   }
 
+  // ── File link rewrite ──────────────────────────────────────────
+
+  function rewriteFileLinks(container) {
+    const anchors = container.querySelectorAll('a');
+    anchors.forEach((a) => {
+      const href = a.getAttribute('href') || '';
+      if (/^https?:/i.test(href) || href.startsWith('#')) return;
+      const match = href.match(/^([^#]+?)(?:#L(\d+)(?:-L?(\d+))?)?$/);
+      if (!match) return;
+      const pathPart = match[1];
+      if (!/\.[a-z0-9]+$/i.test(pathPart)) return;
+
+      a.classList.add('file-link');
+      a.dataset.path = pathPart;
+      if (match[2]) a.dataset.line = match[2];
+      a.title = pathPart;
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        vscode.postMessage({
+          type: 'openFile',
+          path: pathPart,
+          line: match[2] ? parseInt(match[2], 10) : undefined,
+        });
+      });
+    });
+  }
+
+  // ── Thinking block ─────────────────────────────────────────────
+
+  function prependThinkingBlock(bubble, thinking) {
+    if (!bubble || !thinking || !thinking.text) return;
+    if (bubble.querySelector('.thinking-block')) return;
+
+    const details = document.createElement('details');
+    details.className = 'thinking-block';
+    const summary = document.createElement('summary');
+    const icon = document.createElement('span');
+    icon.className = 'thinking-icon';
+    icon.textContent = '💭';
+    const label = document.createElement('span');
+    const secs = thinking.durationMs ? (thinking.durationMs / 1000).toFixed(1) : null;
+    label.textContent = secs ? `Thought for ${secs}s` : 'Reasoning';
+    summary.appendChild(icon);
+    summary.appendChild(label);
+
+    const body = document.createElement('div');
+    body.className = 'thinking-content';
+    body.textContent = thinking.text;
+
+    details.appendChild(summary);
+    details.appendChild(body);
+
+    const meta = bubble.querySelector('.message-meta');
+    if (meta && meta.nextSibling) {
+      bubble.insertBefore(details, meta.nextSibling);
+    } else {
+      bubble.appendChild(details);
+    }
+  }
+
   // ── Message handler (from extension) ────────────────────────────
 
   window.addEventListener('message', (event) => {
@@ -834,6 +1027,17 @@
         if (emptyState) emptyState.remove();
 
         appendMessage(msg.role, msg.content);
+        break;
+      }
+
+      case 'clearMessages': {
+        messagesEl.innerHTML = '';
+        messageCount = 0;
+        chatHistory = [];
+        saveState();
+        if (msg.showEmpty) {
+          showEmptyState();
+        }
         break;
       }
 
@@ -880,6 +1084,30 @@
 
       case 'fileList': {
         showAutocomplete(msg.files || [], msg.noWorkspace);
+        break;
+      }
+
+      case 'thinking': {
+        pendingThinking = {
+          text: msg.text || '',
+          durationMs: msg.durationMs || 0,
+        };
+        if (streamingBubble) {
+          prependThinkingBlock(streamingBubble, pendingThinking);
+          pendingThinking = null;
+        }
+        break;
+      }
+
+      case 'focusInput': {
+        messageInput.focus();
+        break;
+      }
+
+      case 'toggleThinking': {
+        const blocks = messagesEl.querySelectorAll('.thinking-block');
+        const anyClosed = Array.from(blocks).some((b) => !b.open);
+        blocks.forEach((b) => { b.open = anyClosed; });
         break;
       }
     }

@@ -25,6 +25,7 @@ import type {
 } from "../core/types.js";
 import type { Tool, ToolExecutionContext, ToolExecuteResult } from "./base.js";
 import type { ToolDefinition } from "../providers/base.js";
+import { tracer } from "../observability/tracer.js";
 
 // Import all built-in tools
 import { bashTool } from "./bash.js";
@@ -133,50 +134,77 @@ export class ToolRegistry {
     input: unknown,
     context: ToolExecutionContext
   ): Promise<ToolExecuteResult> {
-    const tool = this.tools.get(name);
-    if (!tool) {
-      return { output: `Unknown tool: "${name}"`, is_error: true };
-    }
+    return tracer.withSpan(
+      "tool.execute",
+      {
+        tool_name: name,
+        tool_input: previewInput(input),
+      },
+      async (span): Promise<ToolExecuteResult> => {
+        const tool = this.tools.get(name);
+        if (!tool) {
+          const result = { output: `Unknown tool: "${name}"`, is_error: true };
+          stampError(span, result, "unknown_tool");
+          return result;
+        }
 
-    // Check if tool is allowed in this session
-    if (!this.isToolAllowed(name, context.session)) {
-      return {
-        output: `Tool "${name}" is not allowed in this session.`,
-        is_error: true,
-      };
-    }
+        span?.setAttribute("permission_level", tool.permission_level);
 
-    // Permission mode check
-    const permissionGranted = await this.checkPermission(
-      tool,
-      context.session.permission_mode
+        // Check if tool is allowed in this session
+        if (!this.isToolAllowed(name, context.session)) {
+          const result = {
+            output: `Tool "${name}" is not allowed in this session.`,
+            is_error: true,
+          };
+          stampError(span, result, "not_allowed");
+          return result;
+        }
+
+        // Permission mode check
+        const permissionGranted = await this.checkPermission(
+          tool,
+          context.session.permission_mode
+        );
+
+        if (!permissionGranted) {
+          const result = {
+            output: `Tool "${name}" requires permission level "${tool.permission_level}" which was denied.`,
+            is_error: true,
+          };
+          stampError(span, result, "permission_denied");
+          return result;
+        }
+
+        // Validate input with Zod
+        const parseResult = tool.schema.safeParse(input);
+        if (!parseResult.success) {
+          const result = {
+            output: `Invalid input for tool "${name}": ${parseResult.error.message}`,
+            is_error: true,
+          };
+          stampError(span, result, "invalid_input");
+          return result;
+        }
+
+        // Execute
+        try {
+          const result = await tool.execute(parseResult.data, context);
+          if (result.is_error) {
+            stampError(span, result, "tool_error");
+          } else {
+            span?.setAttribute("output_length", result.output?.length ?? 0);
+          }
+          return result;
+        } catch (e) {
+          const result = {
+            output: `Tool "${name}" threw an error: ${String(e)}`,
+            is_error: true,
+          };
+          span?.recordError(e);
+          return result;
+        }
+      }
     );
-
-    if (!permissionGranted) {
-      return {
-        output: `Tool "${name}" requires permission level "${tool.permission_level}" which was denied.`,
-        is_error: true,
-      };
-    }
-
-    // Validate input with Zod
-    const parseResult = tool.schema.safeParse(input);
-    if (!parseResult.success) {
-      return {
-        output: `Invalid input for tool "${name}": ${parseResult.error.message}`,
-        is_error: true,
-      };
-    }
-
-    // Execute
-    try {
-      return await tool.execute(parseResult.data, context);
-    } catch (e) {
-      return {
-        output: `Tool "${name}" threw an error: ${String(e)}`,
-        is_error: true,
-      };
-    }
   }
 
   /**
@@ -272,3 +300,31 @@ function zodToJsonSchema(schema: z.ZodType<unknown, any, any>): ToolDefinition["
 
 // Singleton registry
 export const registry = new ToolRegistry();
+
+// ---------------------------------------------------------------------------
+// Observability helpers
+// ---------------------------------------------------------------------------
+
+function stampError(
+  span: import("../observability/tracer.js").ActiveSpan | null,
+  result: ToolExecuteResult,
+  reason: string
+): void {
+  if (!span) return;
+  span.setStatus("error");
+  span.setAttributes({
+    is_error: true,
+    error_reason: reason,
+    error_message: result.output?.slice(0, 500),
+  });
+}
+
+function previewInput(input: unknown): unknown {
+  try {
+    const s = JSON.stringify(input);
+    if (s.length <= 400) return input;
+    return s.slice(0, 400) + "…";
+  } catch {
+    return "<unserializable>";
+  }
+}

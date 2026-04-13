@@ -17,7 +17,7 @@
 
 import type { HookContext, HookResult, ToolCall, ToolResult } from "../core/types.js";
 import type { HookRegistration } from "./types.js";
-import { auditLogger } from "../security/audit.js";
+import { tracer } from "../observability/tracer.js";
 
 export class HookEngine {
   private hooks: HookRegistration[] = [];
@@ -53,9 +53,23 @@ export class HookEngine {
       tool_call: context.tool_call,
     };
 
-    await auditLogger.log("PreToolUse", hookContext);
-
-    return this.runHooks(hookContext, "PreToolUse", context.tool_call.name);
+    return tracer.withSpan(
+      "hook.pre",
+      { turn: context.turn, tool_name: context.tool_call.name },
+      async (span) => {
+        const result = await this.runHooks(
+          hookContext,
+          "PreToolUse",
+          context.tool_call.name
+        );
+        span?.setAttribute("action", result.action);
+        if (result.action === "block") {
+          span?.setStatus("error");
+          span?.setAttribute("block_reason", result.reason ?? "");
+        }
+        return result;
+      }
+    );
   }
 
   /**
@@ -75,9 +89,23 @@ export class HookEngine {
       tool_result: context.tool_result,
     };
 
-    await auditLogger.log("PostToolUse", hookContext);
-
-    return this.runHooks(hookContext, "PostToolUse", context.tool_call.name);
+    return tracer.withSpan(
+      "hook.post",
+      {
+        turn: context.turn,
+        tool_name: context.tool_call.name,
+        tool_is_error: context.tool_result.is_error,
+      },
+      async (span) => {
+        const result = await this.runHooks(
+          hookContext,
+          "PostToolUse",
+          context.tool_call.name
+        );
+        span?.setAttribute("action", result.action);
+        return result;
+      }
+    );
   }
 
   /**
@@ -95,9 +123,15 @@ export class HookEngine {
       final_text: context.final_text,
     };
 
-    await auditLogger.log("Stop", hookContext);
-
-    return this.runHooks(hookContext, "Stop");
+    return tracer.withSpan(
+      "hook.stop",
+      { turn: context.turn, final_text_length: context.final_text.length },
+      async (span) => {
+        const result = await this.runHooks(hookContext, "Stop");
+        span?.setAttribute("action", result.action);
+        return result;
+      }
+    );
   }
 
   /**

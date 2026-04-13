@@ -31,14 +31,47 @@ import { assembleContext, compressContext, estimateContextTokens, getContextLimi
 import { withRetry } from "./retry.js";
 import { auditLogger } from "../security/audit.js";
 import { costTracker } from "./cost-tracker.js";
+import { tracer } from "../observability/tracer.js";
 
 export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult> {
-
   const { session } = options;
   const { provider, model: resolvedModel } = router.resolve(
     session.model,
     session.provider
   );
+
+  // ── Observability: root span for the whole session ──
+  const { active: sessionSpan, run: runInTrace } = tracer.startRootSpan(
+    "agent.session",
+    session,
+    {
+      session_id: session.id,
+      model: resolvedModel,
+      provider: session.provider,
+      permission_mode: session.permission_mode,
+      max_turns: session.max_turns,
+      subagent_depth: options._subagent_depth ?? 0,
+    },
+    options._parent_trace_id,
+    options._parent_span_id
+  );
+
+  try {
+    return await runInTrace(() => runAgentInner(options, resolvedModel, sessionSpan));
+  } catch (e) {
+    sessionSpan?.recordError(e);
+    tracer.end(sessionSpan);
+    throw e;
+  }
+}
+
+async function runAgentInner(
+  options: AgentRunOptions,
+  resolvedModel: string,
+  sessionSpan: import("../observability/tracer.js").ActiveSpan | null
+): Promise<AgentRunResult> {
+  const { session } = options;
+  const { provider } = router.resolve(session.model, session.provider);
 
   const cwd = process.cwd();
   const toolContext: ToolExecutionContext = {
@@ -79,29 +112,62 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
   while (turns < session.max_turns) {
     turns++;
 
+    const turnSpan = tracer.startSpan("agent.turn", {
+      turn_number: turns,
+    });
+
+    // Everything the turn does must nest under turnSpan, so run the body
+    // inside its ALS context. The body returns either `null` to continue
+    // the loop, or an AgentRunResult to return from runAgentInner.
+    const turnOutcome: AgentRunResult | null = await tracer.runInSpan(turnSpan, async (): Promise<AgentRunResult | null> => {
     // Get tool definitions for this session
     const tools = registry.getToolDefinitions(session);
 
     // Compress context if approaching window limit
     const compressedMessages = compressContext(messages, resolvedModel, session.provider);
 
-    // Call the LLM with retry logic
-    const response = await withRetry(
-      () => provider.complete({
-        model: resolvedModel,
-        messages: compressedMessages,
-        system: systemPrompt,
-        tools: tools.length > 0 ? tools : undefined,
-        max_tokens: 8192,
-        stream: options.streaming ?? false,
-      }),
+    // Call the LLM with retry logic (wrapped in llm.call span)
+    const response = await tracer.withSpan(
+      "llm.call",
       {
-        maxRetries: 3,
-        onRetry: (attempt, error, delayMs) => {
-          if (options.onText) {
-            options.onText(`\n[Retry ${attempt}/3 after ${Math.round(delayMs / 1000)}s: ${String(error).slice(0, 100)}]\n`);
+        provider: session.provider,
+        model: resolvedModel,
+        tool_count: tools.length,
+      },
+      async (llmSpan) => {
+        let retryCount = 0;
+        const resp = await withRetry(
+          () => provider.complete({
+            model: resolvedModel,
+            messages: compressedMessages,
+            system: systemPrompt,
+            tools: tools.length > 0 ? tools : undefined,
+            max_tokens: 8192,
+            stream: options.streaming ?? false,
+          }),
+          {
+            maxRetries: 3,
+            onRetry: (attempt, error, delayMs) => {
+              retryCount = attempt;
+              if (options.onText) {
+                options.onText(`\n[Retry ${attempt}/3 after ${Math.round(delayMs / 1000)}s: ${String(error).slice(0, 100)}]\n`);
+              }
+            },
           }
-        },
+        );
+        llmSpan?.setAttributes({
+          input_tokens: resp.usage.input_tokens,
+          output_tokens: resp.usage.output_tokens,
+          cost_usd: provider.estimateCost(
+            resolvedModel,
+            resp.usage.input_tokens,
+            resp.usage.output_tokens
+          ),
+          stop_reason: resp.stop_reason,
+          retries: retryCount,
+          tool_calls_requested: resp.tool_calls.length,
+        });
+        return resp;
       }
     );
 
@@ -139,6 +205,17 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         cost_usd: estimatedCost,
         turns,
       });
+      turnSpan?.setAttribute("exit", "max_budget");
+      tracer.end(turnSpan);
+      sessionSpan?.setAttributes({
+        turns,
+        input_tokens: totalInputTokens,
+        output_tokens: totalOutputTokens,
+        cost_usd: estimatedCost,
+        stop_reason: "max_budget",
+      });
+      sessionSpan?.setStatus("error");
+      tracer.end(sessionSpan);
       return buildResult(
         `[Budget exceeded: $${estimatedCost.toFixed(4)} > $${session.max_budget_usd}]\n\n${lastText}`,
         turns,
@@ -187,6 +264,19 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
         turns,
       });
 
+      turnSpan?.setAttributes({
+        has_tool_calls: false,
+        exit: "text",
+      });
+      tracer.end(turnSpan);
+      sessionSpan?.setAttributes({
+        turns,
+        input_tokens: totalInputTokens,
+        output_tokens: totalOutputTokens,
+        cost_usd: estimatedCost,
+        stop_reason: "text",
+      });
+      tracer.end(sessionSpan);
       return buildResult(
         lastText,
         turns,
@@ -310,6 +400,17 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
       content: toolResultBlocks,
       timestamp: new Date().toISOString(),
     });
+
+    turnSpan?.setAttributes({
+      has_tool_calls: true,
+      tool_call_count: response.tool_calls.length,
+      tool_error_count: toolResultBlocks.filter((b) => b.is_error).length,
+    });
+    tracer.end(turnSpan);
+    return null; // continue the outer loop
+    });
+
+    if (turnOutcome) return turnOutcome;
   }
 
   // Hit max_turns
@@ -330,6 +431,16 @@ export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult
     cost_usd: maxTurnsCost,
     turns,
   });
+
+  sessionSpan?.setAttributes({
+    turns,
+    input_tokens: totalInputTokens,
+    output_tokens: totalOutputTokens,
+    cost_usd: maxTurnsCost,
+    stop_reason: "max_turns",
+  });
+  sessionSpan?.setStatus("error");
+  tracer.end(sessionSpan);
 
   return buildResult(
     lastText || "[Max turns reached without a final response]",

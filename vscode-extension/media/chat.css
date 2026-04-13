@@ -677,6 +677,99 @@ body {
   color: var(--vscode-list-activeSelectionForeground, var(--vscode-editor-foreground));
 }
 
+/* ── Thinking Block ─────────────────────────────────────────── */
+.thinking-block {
+  margin: 4px 0 6px;
+  border-left: 2px solid var(--vscode-editorHint-border, var(--vscode-widget-border, rgba(128,128,128,0.3)));
+  padding: 2px 0 2px 8px;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.thinking-block summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  user-select: none;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.thinking-block summary::-webkit-details-marker { display: none; }
+
+.thinking-block summary::before {
+  content: '\25B6';
+  font-size: 7px;
+  opacity: 0.5;
+  transition: transform var(--transition);
+}
+
+.thinking-block[open] summary::before { transform: rotate(90deg); }
+
+.thinking-icon { font-size: 10px; }
+
+.thinking-content {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+/* ── File links ─────────────────────────────────────────────── */
+.file-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--vscode-textBlockQuote-background, rgba(128,128,128,0.12));
+  border: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.2));
+  color: var(--vscode-textLink-foreground) !important;
+  text-decoration: none !important;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.92em;
+  cursor: pointer;
+}
+
+.file-link::before {
+  content: '\1F4C4';
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+
+.file-link:hover {
+  background: var(--vscode-list-hoverBackground);
+  text-decoration: none !important;
+}
+
+/* ── Retry button on errors ─────────────────────────────────── */
+.retry-btn {
+  margin-top: 6px;
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, var(--vscode-errorForeground));
+  border: 1px solid var(--vscode-widget-border, rgba(128,128,128,0.3));
+  padding: 2px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 10px;
+  font-family: var(--vscode-font-family);
+}
+
+.retry-btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground));
+}
+
+/* ── Code block max-height ──────────────────────────────────── */
+.message-content pre code {
+  max-height: 360px;
+}
+
 /* ── Reduced Motion ────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.01ms !important; }

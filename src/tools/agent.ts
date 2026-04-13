@@ -19,6 +19,7 @@
 import { z } from "zod";
 import { ok, err } from "./base.js";
 import type { Tool, ToolExecutionContext, ToolExecuteResult } from "./base.js";
+import { tracer } from "../observability/tracer.js";
 
 const AgentInputSchema = z.object({
   prompt: z.string().describe("The task to assign to the subagent"),
@@ -94,19 +95,42 @@ export const agentTool: Tool<AgentInput> = {
       ),
     };
 
-    try {
-      const result = await runAgent({
-        prompt: input.prompt,
-        session: subSession,
-        system_prompt: input.system_prompt,
-        // FIX(iteration-1): propagate incremented depth so the child enforces
-        // the same recursion cap when it tries to spawn its own children.
-        _subagent_depth: currentDepth + 1,
-      });
+    return tracer.withSpan(
+      "subagent.run",
+      {
+        child_session_id: subSessionId,
+        depth: currentDepth + 1,
+        prompt_preview: input.prompt.slice(0, 120),
+      },
+      async (span) => {
+        const parent = tracer.currentContext();
+        try {
+          const result = await runAgent({
+            prompt: input.prompt,
+            session: subSession,
+            system_prompt: input.system_prompt,
+            // FIX(iteration-1): propagate incremented depth so the child enforces
+            // the same recursion cap when it tries to spawn its own children.
+            _subagent_depth: currentDepth + 1,
+            _parent_trace_id: parent?.trace_id,
+            _parent_span_id: parent?.span_id,
+          });
 
-      return ok(result.text || "(subagent completed with no text output)");
-    } catch (e) {
-      return err(`Subagent error: ${String(e)}`);
-    }
+          span?.setAttributes({
+            child_turns: result.turns,
+            child_cost_usd: result.cost_usd,
+            child_input_tokens: result.usage.input,
+            child_output_tokens: result.usage.output,
+            child_stop_reason: result.stop_reason,
+          });
+          if (result.stop_reason === "error") span?.setStatus("error");
+
+          return ok(result.text || "(subagent completed with no text output)");
+        } catch (e) {
+          span?.recordError(e);
+          return err(`Subagent error: ${String(e)}`);
+        }
+      }
+    );
   },
 };

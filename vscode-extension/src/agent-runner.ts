@@ -126,6 +126,17 @@ export class AgentRunner {
 
   private _lastSearchedPaths: string[] = [];
 
+  public getSessionsDir(): string | null {
+    const dir = this.getAltimeterPath();
+    if (!dir) return null;
+    return path.join(dir, 'sessions');
+  }
+
+  public getAltimeterDir(): string | null {
+    const dir = this.getAltimeterPath();
+    return dir || null;
+  }
+
   private buildEnv(provider: string): NodeJS.ProcessEnv {
     const config = this.getConfig();
     const env: Record<string, string> = { ...process.env } as Record<string, string>;

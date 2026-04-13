@@ -2,13 +2,17 @@ import * as vscode from 'vscode';
 import { AgentRunner } from './agent-runner';
 import { AltimeterChatProvider } from './chat-provider';
 import { AltimeterStatusBar } from './status-bar';
+import { SessionsProvider, SessionTreeItem } from './sessions-provider';
+import { SessionPanelManager } from './session-panel-manager';
 
 export function registerCommands(
   context: vscode.ExtensionContext,
   runner: AgentRunner,
   chatProvider: AltimeterChatProvider,
   statusBar: AltimeterStatusBar,
-  outputChannel: vscode.OutputChannel
+  outputChannel: vscode.OutputChannel,
+  sessionsProvider: SessionsProvider,
+  sessionPanelManager: SessionPanelManager
 ): void {
   // Open Chat
   context.subscriptions.push(
@@ -280,6 +284,131 @@ export function registerCommands(
         }
       );
     })
+  );
+  // New Session
+  context.subscriptions.push(
+    vscode.commands.registerCommand('altimeter.newSession', async () => {
+      await chatProvider.newSession();
+    })
+  );
+
+  // Refresh Sessions
+  context.subscriptions.push(
+    vscode.commands.registerCommand('altimeter.refreshSessions', () => {
+      sessionsProvider.refresh();
+    })
+  );
+
+  // Open Session (called from tree item click or command palette)
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      'altimeter.openSession',
+      async (idOrItem?: string | SessionTreeItem) => {
+        let id: string | undefined;
+        if (typeof idOrItem === 'string') {
+          id = idOrItem;
+        } else if (idOrItem && 'meta' in idOrItem) {
+          id = idOrItem.meta.id;
+        } else {
+          const sessions = sessionsProvider.listSessionsFromDisk();
+          if (sessions.length === 0) {
+            vscode.window.showInformationMessage('No sessions found');
+            return;
+          }
+          const picked = await vscode.window.showQuickPick(
+            sessions.map((s) => ({
+              label: s.title,
+              description: s.created_at,
+              id: s.id,
+            })),
+            { title: 'Open Altimeter Session' }
+          );
+          id = picked?.id;
+        }
+        if (id) {
+          const sessions = sessionsProvider.listSessionsFromDisk();
+          const meta = sessions.find((s) => s.id === id);
+          await sessionPanelManager.openSession(id, meta?.title);
+        }
+      }
+    )
+  );
+
+  // Toggle Show All Sessions
+  context.subscriptions.push(
+    vscode.commands.registerCommand('altimeter.toggleShowAllSessions', () => {
+      sessionsProvider.toggleShowAll();
+    })
+  );
+
+  // Focus Chat Input (Ctrl+L)
+  context.subscriptions.push(
+    vscode.commands.registerCommand('altimeter.focusInput', async () => {
+      await vscode.commands.executeCommand('altimeter.chatView.focus');
+      const view = chatProvider.view;
+      if (view) {
+        view.webview.postMessage({ type: 'focusInput' });
+      }
+    })
+  );
+
+  // Toggle Thinking Blocks (Ctrl+Shift+T)
+  context.subscriptions.push(
+    vscode.commands.registerCommand('altimeter.toggleThinking', () => {
+      const view = chatProvider.view;
+      if (view) {
+        view.webview.postMessage({ type: 'toggleThinking' });
+      }
+    })
+  );
+
+  // Clear Current Session (Ctrl+Shift+K)
+  context.subscriptions.push(
+    vscode.commands.registerCommand('altimeter.clearSession', async () => {
+      await chatProvider.newSession();
+    })
+  );
+
+  // Rename Session
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      'altimeter.renameSession',
+      async (item?: SessionTreeItem) => {
+        if (!item || !('meta' in item)) return;
+        const newTitle = await vscode.window.showInputBox({
+          title: 'Rename Session',
+          value: item.meta.title,
+          ignoreFocusOut: true,
+        });
+        if (!newTitle) return;
+        const ok = sessionsProvider.renameSession(item.meta.id, newTitle);
+        if (!ok) {
+          vscode.window.showErrorMessage('Failed to rename session');
+        }
+      }
+    )
+  );
+
+  // Delete Session
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      'altimeter.deleteSession',
+      async (item?: SessionTreeItem) => {
+        if (!item || !('meta' in item)) return;
+        const confirm = await vscode.window.showWarningMessage(
+          `Delete session "${item.meta.title}"?`,
+          { modal: true },
+          'Delete'
+        );
+        if (confirm !== 'Delete') return;
+        const ok = sessionsProvider.deleteSession(item.meta.id);
+        if (!ok) {
+          vscode.window.showErrorMessage('Failed to delete session');
+        } else if (chatProvider.currentSessionId === item.meta.id) {
+          await chatProvider.newSession();
+        }
+      }
+    )
   );
 }
 

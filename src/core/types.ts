@@ -169,9 +169,37 @@ export interface SessionEvent {
     | "tool_result"
     | "session_end"
     | "error"
-    | "compaction";
+    | "compaction"
+    | "span_start"
+    | "span_end";
   timestamp: string;
   data: unknown;
+}
+
+// ---------------------------------------------------------------------------
+// Observability — OTel-shaped spans (local-file only, no SDK dependency)
+// ---------------------------------------------------------------------------
+
+export type SpanStatus = "ok" | "error" | "in_progress";
+
+export interface SpanError {
+  type: string;
+  message: string;
+  stack?: string;
+}
+
+export interface Span {
+  trace_id: string;
+  span_id: string;
+  parent_span_id?: string;
+  name: string;
+  session_id: string;
+  start_time: string;
+  end_time?: string;
+  duration_ms?: number;
+  status: SpanStatus;
+  attributes: Record<string, unknown>;
+  error?: SpanError;
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +229,13 @@ export interface AgentRunOptions {
    * MAX_SUBAGENT_DEPTH across the call tree.
    */
   _subagent_depth?: number;
+  /**
+   * Parent trace/span for subagent linkage. Set by the `agent` tool when
+   * spawning a child so the child's `agent.session` span joins the parent
+   * trace and points back at the `subagent.run` span that launched it.
+   */
+  _parent_trace_id?: string;
+  _parent_span_id?: string;
 }
 
 export interface AgentRunResult {
@@ -255,6 +290,18 @@ export const AltimeterConfigSchema = z.object({
       PreToolUse: z.array(z.string()).default([]),
       PostToolUse: z.array(z.string()).default([]),
       Stop: z.array(z.string()).default([]),
+    })
+    .default({}),
+  /** Observability — two-tier tracing + story summaries */
+  observability: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** off = no spans; summary = spans but no live printer; full = all */
+      level: z.enum(["off", "summary", "full"]).default("full"),
+      /** If true, the end-of-session summary includes an LLM-narrated paragraph */
+      narrate: z.boolean().default(false),
+      /** Reserved for future OTel exporter; unused in v1 */
+      otel_endpoint: z.string().optional(),
     })
     .default({}),
   /** Heartbeat / cron jobs */

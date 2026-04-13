@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { randomUUID } from 'crypto';
 import { AgentRunner, RunnerConfig } from './agent-runner';
 import { AltimeterStatusBar } from './status-bar';
+import { SessionsProvider } from './sessions-provider';
 
 export class AltimeterChatProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'altimeter.chatView';
@@ -15,6 +16,7 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
   private _isRunning = false;
   private _streamingMessageStarted = false;
   private _sessionId: string = randomUUID();
+  private _sessionsProvider?: SessionsProvider;
 
   constructor(
     extensionUri: vscode.Uri,
@@ -24,6 +26,45 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
     this._extensionUri = extensionUri;
     this._runner = runner;
     this._statusBar = statusBar;
+  }
+
+  public setSessionsProvider(provider: SessionsProvider): void {
+    this._sessionsProvider = provider;
+    this._sessionsProvider.setActive(this._sessionId);
+  }
+
+  public get currentSessionId(): string {
+    return this._sessionId;
+  }
+
+  public async newSession(): Promise<void> {
+    await vscode.commands.executeCommand('altimeter.chatView.focus');
+    this._sessionId = randomUUID();
+    this._postMessage({ type: 'clearMessages', showEmpty: true });
+    this._sessionsProvider?.setActive(this._sessionId);
+  }
+
+  public async loadSession(id: string): Promise<void> {
+    if (!this._sessionsProvider) return;
+    await vscode.commands.executeCommand('altimeter.chatView.focus');
+    // Give the webview a moment to resolve if it was just created
+    await new Promise((r) => setTimeout(r, 150));
+
+    this._sessionId = id;
+    const messages = this._sessionsProvider.replaySession(id);
+
+    this._postMessage({ type: 'clearMessages', showEmpty: false });
+    for (const m of messages) {
+      this._postMessage({
+        type: 'addMessage',
+        role: m.role,
+        content: m.content,
+      });
+    }
+    if (messages.length === 0) {
+      this._postMessage({ type: 'clearMessages', showEmpty: true });
+    }
+    this._sessionsProvider.setActive(this._sessionId);
   }
 
   public resolveWebviewView(
@@ -59,9 +100,19 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
           break;
         case 'clearSession':
           this._sessionId = randomUUID();
+          this._sessionsProvider?.setActive(this._sessionId);
           break;
         case 'requestFiles':
           await this._handleRequestFiles(message.query);
+          break;
+        case 'openFile':
+          await this._handleOpenFile(message.path, message.line);
+          break;
+        case 'pickModel':
+          await this._handlePickModel();
+          break;
+        case 'newSession':
+          await this.newSession();
           break;
         case 'ready':
           // Webview is ready
@@ -173,6 +224,7 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
       this._streamingMessageStarted = false;
       this._statusBar.setIdle();
       this._postMessage({ type: 'loading', active: false });
+      this._sessionsProvider?.refresh();
     }
   }
 
@@ -198,6 +250,46 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
       config.effort = message.effort.toLowerCase();
     }
     this._runner.setConfig(config);
+  }
+
+  private async _handleOpenFile(relPath: string, line?: number): Promise<void> {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders || folders.length === 0 || !relPath) return;
+    try {
+      const uri = vscode.Uri.joinPath(folders[0].uri, relPath);
+      const doc = await vscode.workspace.openTextDocument(uri);
+      const options: vscode.TextDocumentShowOptions = { preview: false };
+      if (line && line > 0) {
+        const pos = new vscode.Position(line - 1, 0);
+        options.selection = new vscode.Range(pos, pos);
+      }
+      await vscode.window.showTextDocument(doc, options);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      vscode.window.showWarningMessage(`Could not open ${relPath}: ${msg}`);
+    }
+  }
+
+  private async _handlePickModel(): Promise<void> {
+    const models = [
+      'gemini-2.5-flash',
+      'gemini-2.5-pro',
+      'claude-3-5-sonnet-20241022',
+      'claude-3-5-haiku-20241022',
+      'gpt-4o',
+      'gpt-4o-mini',
+      'kimi-k2-0905-preview',
+      'kimi-k2-thinking-turbo',
+      'moonshot-v1-32k',
+    ];
+    const picked = await vscode.window.showQuickPick(models, {
+      title: 'Select Altimeter Model',
+      placeHolder: 'Pick a model for the active session',
+    });
+    if (picked) {
+      this._handleConfigChange({ model: picked });
+      this._postMessage({ type: 'modelChanged', model: picked });
+    }
   }
 
   private async _handleRequestFiles(query?: string): Promise<void> {
@@ -290,12 +382,41 @@ export class AltimeterChatProvider implements vscode.WebviewViewProvider {
 
   private _lastToolName = '';
   private _lastToolInput = '';
+  private _thinkingBuffer = '';
+  private _thinkingStartedAt = 0;
+  private _capturingThinking = false;
 
   private _parseStderrForTools(chunk: string): void {
     const lines = chunk.split('\n');
     for (const line of lines) {
       const clean = line.trim();
       if (!clean) continue;
+
+      // Match [Thinking] start
+      if (clean === '[Thinking]') {
+        this._capturingThinking = true;
+        this._thinkingBuffer = '';
+        this._thinkingStartedAt = Date.now();
+        continue;
+      }
+      const thinkingDoneMatch = clean.match(/^\[ThinkingDone\](?:\s+(\d+))?/);
+      if (thinkingDoneMatch) {
+        const explicit = thinkingDoneMatch[1] ? parseInt(thinkingDoneMatch[1], 10) : 0;
+        const durationMs = explicit || (this._thinkingStartedAt ? Date.now() - this._thinkingStartedAt : 0);
+        this._postMessage({
+          type: 'thinking',
+          text: this._thinkingBuffer.trim(),
+          durationMs,
+        });
+        this._capturingThinking = false;
+        this._thinkingBuffer = '';
+        this._thinkingStartedAt = 0;
+        continue;
+      }
+      if (this._capturingThinking) {
+        this._thinkingBuffer += line + '\n';
+        continue;
+      }
 
       // Match [Tool] tool_name
       const toolMatch = clean.match(/^\[Tool\]\s+(\S+)/);

@@ -33,6 +33,13 @@
     "views": {
       "altimeter-sidebar": [
         {
+          "type": "tree",
+          "id": "altimeter.sessionsView",
+          "name": "Sessions",
+          "icon": "resources/icon.svg",
+          "contextualTitle": "Altimeter Sessions"
+        },
+        {
           "type": "webview",
           "id": "altimeter.chatView",
           "name": "Chat",
@@ -103,9 +110,82 @@
         "command": "altimeter.askAltimeter",
         "title": "Altimeter: Ask Altimeter",
         "category": "Altimeter"
+      },
+      {
+        "command": "altimeter.newSession",
+        "title": "New Session",
+        "category": "Altimeter",
+        "icon": "$(add)"
+      },
+      {
+        "command": "altimeter.refreshSessions",
+        "title": "Refresh Sessions",
+        "category": "Altimeter",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "altimeter.openSession",
+        "title": "Open Session",
+        "category": "Altimeter"
+      },
+      {
+        "command": "altimeter.renameSession",
+        "title": "Rename",
+        "category": "Altimeter",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "altimeter.deleteSession",
+        "title": "Delete",
+        "category": "Altimeter",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "altimeter.toggleShowAllSessions",
+        "title": "Toggle Show All Sessions",
+        "category": "Altimeter"
+      },
+      {
+        "command": "altimeter.focusInput",
+        "title": "Focus Chat Input",
+        "category": "Altimeter"
+      },
+      {
+        "command": "altimeter.toggleThinking",
+        "title": "Toggle Thinking Blocks",
+        "category": "Altimeter"
+      },
+      {
+        "command": "altimeter.clearSession",
+        "title": "Clear Current Session",
+        "category": "Altimeter"
       }
     ],
     "menus": {
+      "view/title": [
+        {
+          "command": "altimeter.newSession",
+          "when": "view == altimeter.sessionsView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "altimeter.refreshSessions",
+          "when": "view == altimeter.sessionsView",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "altimeter.renameSession",
+          "when": "view == altimeter.sessionsView && viewItem == altimeterSession",
+          "group": "inline@1"
+        },
+        {
+          "command": "altimeter.deleteSession",
+          "when": "view == altimeter.sessionsView && viewItem == altimeterSession",
+          "group": "inline@2"
+        }
+      ],
       "editor/context": [
         {
           "command": "altimeter.explainInChat",
@@ -134,6 +214,30 @@
         "command": "altimeter.runPrompt",
         "key": "ctrl+shift+r",
         "mac": "cmd+shift+r"
+      },
+      {
+        "command": "altimeter.newSession",
+        "key": "ctrl+shift+n",
+        "mac": "cmd+shift+n",
+        "when": "focusedView == altimeter.chatView || focusedView == altimeter.sessionsView"
+      },
+      {
+        "command": "altimeter.focusInput",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "focusedView == altimeter.chatView"
+      },
+      {
+        "command": "altimeter.toggleThinking",
+        "key": "ctrl+shift+t",
+        "mac": "cmd+shift+t",
+        "when": "focusedView == altimeter.chatView"
+      },
+      {
+        "command": "altimeter.clearSession",
+        "key": "ctrl+shift+k",
+        "mac": "cmd+shift+k",
+        "when": "focusedView == altimeter.chatView"
       }
     ],
     "configuration": {
